@@ -1,10 +1,12 @@
 import html
+import json
 from datetime import datetime, timezone
 
 import folium
 import requests
 import streamlit as st
 from streamlit_folium import st_folium
+from branca.element import MacroElement, Template
 
 st.set_page_config(page_title='FAweather | Kansas Weather Alerts', page_icon='🌪️', layout='wide')
 
@@ -62,18 +64,90 @@ def active_alerts(area=None, point=None):
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def latest_radar_frame():
-    """RainViewer public radar manifest; only past observed frames, not forecasts."""
-    data = requests.get('https://api.rainviewer.com/public/weather-maps.json', timeout=15).json()
+def radar_history():
+    """Get observed radar frames from RainViewer; never interpret as forecast."""
+    response = requests.get('https://api.rainviewer.com/public/weather-maps.json', timeout=15)
+    response.raise_for_status()
+    data = response.json()
     frames = (data.get('radar') or {}).get('past') or []
-    if not frames:
-        raise ValueError('No radar frames currently available')
-    frame = frames[-1]
     host = data.get('host', '')
-    path = frame.get('path', '')
-    if not host.startswith('https://') or not path.startswith('/v2/radar/'):
-        raise ValueError('Unexpected radar service response')
-    return host + path + '/256/{z}/{x}/{y}/2/1_1.png', frame['time']
+    if not host.startswith('https://') or not host.endswith('.rainviewer.com'):
+        raise ValueError('Unexpected radar host from RainViewer')
+    result = []
+    for frame in frames:
+        path = frame.get('path', '')
+        stamp = frame.get('time')
+        if path.startswith('/v2/radar/') and isinstance(stamp, (int, float)):
+            result.append({'url': host + path + '/256/{z}/{x}/{y}/2/1_1.png',
+                           'label': datetime.fromtimestamp(stamp, timezone.utc).strftime('%H:%M UTC'),
+                           'time': stamp})
+    if not result:
+        raise ValueError('No radar frames currently available')
+    return result
+
+
+class RadarPlayback(MacroElement):
+    """Leaflet playback control lives inside the map, so Streamlit reruns are unnecessary."""
+    _template = Template(r"""
+    {% macro script(this, kwargs) %}
+    (function () {
+      var map = {{this._parent.get_name()}};
+      var frames = {{this.frames_json|safe}};
+      var current = frames.length - 1;
+      var radar = L.tileLayer(frames[current].url, {
+        opacity: 0.70, maxNativeZoom: 7, maxZoom: 18,
+        attribution: 'Radar: RainViewer (rainviewer.com)', crossOrigin: true
+      }).addTo(map);
+      // Keep radar below warning polygons, markers and their clickable popups.
+      radar.bringToBack();
+      var control = L.control({position:'bottomleft'});
+      control.onAdd = function () {
+        var wrap = L.DomUtil.create('div');
+        wrap.style.cssText = 'background:#101e31;color:white;padding:10px 12px;border:1px solid #7b8ca4;border-radius:8px;min-width:235px;box-shadow:0 2px 8px #0008;font:13px sans-serif';
+        var row = L.DomUtil.create('div', '', wrap);
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:6px';
+        var button = L.DomUtil.create('button', '', row);
+        button.type = 'button'; button.textContent = '▶ Play';
+        button.style.cssText = 'padding:5px 10px;cursor:pointer;border-radius:5px;border:1px solid #8fa3bb;background:#223e60;color:white';
+        var label = L.DomUtil.create('span', '', row);
+        var slider = L.DomUtil.create('input', '', wrap);
+        slider.type = 'range'; slider.min = 0; slider.max = frames.length - 1;
+        slider.step = 1; slider.value = current; slider.style.width = '100%';
+        var note = L.DomUtil.create('div', '', wrap);
+        note.textContent = 'Past observed radar • not a forecast';
+        note.style.cssText = 'font-size:11px;color:#c5d5e9;margin-top:4px';
+        var timer = null;
+        function show(i) {
+          current = i;
+          radar.setUrl(frames[i].url);
+          slider.value = i;
+          label.textContent = frames[i].label;
+        }
+        function stop() {
+          if (timer !== null) {clearInterval(timer);timer = null;}
+          button.textContent = '▶ Play';
+        }
+        button.onclick = function () {
+          if (timer !== null) {stop();return;}
+          button.textContent = '❚❚ Pause';
+          timer = setInterval(function () {show((current + 1) % frames.length);}, 900);
+        };
+        slider.oninput = function () {stop();show(Number(slider.value));};
+        map.on('unload', stop);
+        L.DomEvent.disableClickPropagation(wrap);
+        L.DomEvent.disableScrollPropagation(wrap);
+        show(current);
+        return wrap;
+      };
+      control.addTo(map);
+    })();
+    {% endmacro %}
+    """)
+
+    def __init__(self, frames):
+        super().__init__()
+        self._name = 'RadarPlayback'
+        self.frames_json = json.dumps(frames)
 
 
 def category(feature):
@@ -127,16 +201,11 @@ def show_alert(feature):
     st.divider()
 
 
-def make_warning_map(alerts, loc, radar_tiles=None, radar_opacity=0.7):
+def make_warning_map(alerts, loc, radar_frames=None):
     m = folium.Map(location=[38.5, -98], zoom_start=7, tiles='OpenStreetMap', control_scale=True)
-    # Radar is drawn first so NWS warning outlines remain above it.
-    if radar_tiles:
-        folium.TileLayer(
-            tiles=radar_tiles, name='Precipitation radar (RainViewer)',
-            attr='Radar: RainViewer (rainviewer.com)', overlay=True,
-            control=True, show=True, opacity=radar_opacity,
-            max_native_zoom=7, max_zoom=18,
-        ).add_to(m)
+    # Radar playback is added after polygon layers; its tile pane remains below overlays.
+    if radar_frames:
+        m.add_child(RadarPlayback(radar_frames))
     drawn = 0
     for feature in alerts:
         geom = feature.get('geometry')
@@ -167,7 +236,7 @@ def make_warning_map(alerts, loc, radar_tiles=None, radar_opacity=0.7):
 
 
 st.title('🌪️ FAweather | Kansas Severe Weather Center')
-st.caption('Official NWS alerts • Radar + warning polygons on one map • Local forecasts')
+st.caption('Official NWS alerts • Animated radar + warning polygons on one map • Local forecasts')
 st.markdown('<div class="weather-note">⚠️ This site is supplemental weather information, not an emergency notification system. Keep Wireless Emergency Alerts and NOAA Weather Radio enabled. Always follow official NWS instructions.</div>', unsafe_allow_html=True)
 
 with st.sidebar:
@@ -223,18 +292,17 @@ def live_warnings():
             st.write(f"**{elevated_tag(a)}:** {(a.get('properties') or {}).get('areaDesc') or 'See alert details'}")
 
     st.markdown('**Radar + NWS warning map** — radar precipitation beneath clickable official warning polygons.')
-    radar_tiles = None
-    radar_time = None
+    frames = None
     try:
-        radar_tiles, radar_time = latest_radar_frame()
+        frames = radar_history()
     except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
         st.warning(f'Radar imagery is temporarily unavailable ({exc}). NWS warnings are still displayed.')
-    if radar_time:
-        radar_utc = datetime.fromtimestamp(radar_time, tz=timezone.utc).strftime('%b %d, %Y %H:%M UTC')
-        st.caption(f'Radar frame timestamp: {radar_utc} (radar can be delayed). Use map layer control to toggle radar.')
-    m, drawn = make_warning_map(statewide, loc, radar_tiles)
-
-    st_folium(m, width='stretch', height=540, returned_objects=[], key='ks_warning_map')
+    if frames:
+        first = datetime.fromtimestamp(frames[0]['time'], timezone.utc).strftime('%b %d, %Y %H:%M UTC')
+        last = datetime.fromtimestamp(frames[-1]['time'], timezone.utc).strftime('%b %d, %Y %H:%M UTC')
+        st.caption(f'Radar history: {first} to {last} • {len(frames)} frames • Use ▶ Play, ❚❚ Pause or the timeline **inside the map**. Frames can be delayed.')
+    m, drawn = make_warning_map(statewide, loc, frames)
+    st_folium(m, width='stretch', height=600, returned_objects=[], key='ks_warning_map')
     missing = len(statewide) - drawn
     if missing:
         st.info(f'{missing} active alert(s) have no usable polygon geometry and are listed in text below. Map shapes alone do not show every alert.')
