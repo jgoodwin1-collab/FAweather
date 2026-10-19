@@ -9,7 +9,7 @@ from streamlit_folium import st_folium
 st.set_page_config(page_title='FAweather | Kansas Weather Alerts', page_icon='🌪️', layout='wide')
 
 # Replace with an email address you control before publishing.
-USER_AGENT = 'FAweather/2.0 (contact: jgoodwin1@gmail.com)'
+USER_AGENT = 'FAweather/2.0 (contact: replace-with-your-email@example.com)'
 HEADERS = {'User-Agent': USER_AGENT, 'Accept': 'application/geo+json'}
 KS_BOUNDS = [[36.99, -102.05], [40.01, -94.59]]
 
@@ -59,6 +59,21 @@ def active_alerts(area=None, point=None):
     params = {'area': area} if area else {'point': point}
     data = api_json('https://api.weather.gov/alerts/active', params=params)
     return data.get('features', []), datetime.now(timezone.utc).isoformat()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def latest_radar_frame():
+    """RainViewer public radar manifest; only past observed frames, not forecasts."""
+    data = requests.get('https://api.rainviewer.com/public/weather-maps.json', timeout=15).json()
+    frames = (data.get('radar') or {}).get('past') or []
+    if not frames:
+        raise ValueError('No radar frames currently available')
+    frame = frames[-1]
+    host = data.get('host', '')
+    path = frame.get('path', '')
+    if not host.startswith('https://') or not path.startswith('/v2/radar/'):
+        raise ValueError('Unexpected radar service response')
+    return host + path + '/256/{z}/{x}/{y}/2/1_1.png', frame['time']
 
 
 def category(feature):
@@ -112,8 +127,16 @@ def show_alert(feature):
     st.divider()
 
 
-def make_warning_map(alerts, loc):
+def make_warning_map(alerts, loc, radar_tiles=None, radar_opacity=0.7):
     m = folium.Map(location=[38.5, -98], zoom_start=7, tiles='OpenStreetMap', control_scale=True)
+    # Radar is drawn first so NWS warning outlines remain above it.
+    if radar_tiles:
+        folium.TileLayer(
+            tiles=radar_tiles, name='Precipitation radar (RainViewer)',
+            attr='Radar: RainViewer (rainviewer.com)', overlay=True,
+            control=True, show=True, opacity=radar_opacity,
+            max_native_zoom=7, max_zoom=18,
+        ).add_to(m)
     drawn = 0
     for feature in alerts:
         geom = feature.get('geometry')
@@ -138,12 +161,13 @@ def make_warning_map(alerts, loc):
         drawn += 1
     folium.Marker([loc['lat'], loc['lon']], tooltip=f"{loc['city']} ({loc['zip']})",
                   icon=folium.Icon(color='blue', icon='home')).add_to(m)
+    folium.LayerControl(collapsed=False).add_to(m)
     m.fit_bounds(KS_BOUNDS)
     return m, drawn
 
 
 st.title('🌪️ FAweather | Kansas Severe Weather Center')
-st.caption('Official NWS alerts • Kansas statewide warning map • Local forecasts')
+st.caption('Official NWS alerts • Radar + warning polygons on one map • Local forecasts')
 st.markdown('<div class="weather-note">⚠️ This site is supplemental weather information, not an emergency notification system. Keep Wireless Emergency Alerts and NOAA Weather Radio enabled. Always follow official NWS instructions.</div>', unsafe_allow_html=True)
 
 with st.sidebar:
@@ -198,12 +222,23 @@ def live_warnings():
         for a in priority:
             st.write(f"**{elevated_tag(a)}:** {(a.get('properties') or {}).get('areaDesc') or 'See alert details'}")
 
-    st.markdown('**Warning map** — shaded shapes are official NWS alert polygons, not radar precipitation.')
-    m, drawn = make_warning_map(statewide, loc)
+    st.markdown('**Radar + NWS warning map** — radar precipitation beneath clickable official warning polygons.')
+    radar_tiles = None
+    radar_time = None
+    try:
+        radar_tiles, radar_time = latest_radar_frame()
+    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+        st.warning(f'Radar imagery is temporarily unavailable ({exc}). NWS warnings are still displayed.')
+    if radar_time:
+        radar_utc = datetime.fromtimestamp(radar_time, tz=timezone.utc).strftime('%b %d, %Y %H:%M UTC')
+        st.caption(f'Radar frame timestamp: {radar_utc} (radar can be delayed). Use map layer control to toggle radar.')
+    m, drawn = make_warning_map(statewide, loc, radar_tiles)
+
     st_folium(m, width='stretch', height=540, returned_objects=[], key='ks_warning_map')
     missing = len(statewide) - drawn
     if missing:
         st.info(f'{missing} active alert(s) have no usable polygon geometry and are listed in text below. Map shapes alone do not show every alert.')
+    st.caption('Radar: RainViewer public API • Warning polygons: NWS. Radar imagery is observational, may be delayed, and is not a forecast.')
     st.caption('Map colors: 🔴 Tornado warning • 🟠 Severe thunderstorm warning • 🟣 Flash flood warning • other alerts shown in distinct colors.')
 
     st.subheader('Warnings affecting your selected location')
@@ -253,4 +288,5 @@ else:
         st.dataframe(rows, width='stretch', hide_index=True)
 
 st.divider()
-st.caption('Sources: U.S. National Weather Service API (weather.gov), Zippopotam.us, OpenStreetMap. Data and network availability may be delayed. No guarantees of continuous monitoring or alert delivery. Not affiliated with NOAA or the NWS.')
+st.markdown('[Radar imagery by RainViewer](https://www.rainviewer.com/) · [Official NWS radar](https://radar.weather.gov/)')
+st.caption('Sources: U.S. National Weather Service API (weather.gov), RainViewer radar (rainviewer.com), Zippopotam.us, OpenStreetMap. Data and network availability may be delayed. No guarantees of continuous monitoring or alert delivery. Not affiliated with NOAA or the NWS.')
