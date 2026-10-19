@@ -94,12 +94,9 @@ class RadarPlayback(MacroElement):
       var map = {{this._parent.get_name()}};
       var frames = {{this.frames_json|safe}};
       var current = frames.length - 1;
-      var radar = L.tileLayer(frames[current].url, {
-        opacity: 0.70, maxNativeZoom: 7, maxZoom: 18,
-        attribution: 'Radar: RainViewer (rainviewer.com)', crossOrigin: true
-      }).addTo(map);
-      // Keep radar below warning polygons, markers and their clickable popups.
-      radar.bringToBack();
+      // Animate the Folium-managed overlay already registered in LayerControl.
+      // Do not call bringToBack(): that puts transparent radar UNDER OpenStreetMap.
+      var radar = {{this.radar_layer_name}};
       var control = L.control({position:'bottomleft'});
       control.onAdd = function () {
         var wrap = L.DomUtil.create('div');
@@ -144,10 +141,11 @@ class RadarPlayback(MacroElement):
     {% endmacro %}
     """)
 
-    def __init__(self, frames):
+    def __init__(self, frames, radar_layer):
         super().__init__()
         self._name = 'RadarPlayback'
         self.frames_json = json.dumps(frames)
+        self.radar_layer_name = radar_layer.get_name()
 
 
 def category(feature):
@@ -203,9 +201,21 @@ def show_alert(feature):
 
 def make_warning_map(alerts, loc, radar_frames=None):
     m = folium.Map(location=[38.5, -98], zoom_start=7, tiles='OpenStreetMap', control_scale=True)
-    # Radar playback is added after polygon layers; its tile pane remains below overlays.
+    # Keep radar as a genuine Folium overlay: visible above OpenStreetMap,
+    # below NWS vector polygons, and available in the map's layer selector.
     if radar_frames:
-        m.add_child(RadarPlayback(radar_frames))
+        radar_layer = folium.TileLayer(
+            tiles=radar_frames[-1]['url'],
+            name='Animated Radar (RainViewer)',
+            attr='Radar imagery: RainViewer',
+            overlay=True,
+            control=True,
+            show=True,
+            opacity=0.70,
+            max_native_zoom=7,
+            max_zoom=18,
+        ).add_to(m)
+        m.add_child(RadarPlayback(radar_frames, radar_layer))
     drawn = 0
     for feature in alerts:
         geom = feature.get('geometry')
