@@ -1,3 +1,4 @@
+import re
 import html
 import json
 from datetime import datetime, timezone
