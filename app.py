@@ -481,8 +481,17 @@ LSR_MARKER_CSS = r"""
  filter:drop-shadow(0 2px 2px rgba(0,0,0,.9));}
 .lsr-label::after {content:'';position:absolute;left:50%;bottom:-5px;transform:translateX(-50%);
  width:6px;height:6px;border-radius:50%;background:#fff;border:1px solid #152238;}
-.lsr-hail {color:#fff;text-shadow:1px 1px #90b6d1,-1px -1px #dcefff,2px 3px #537a9a;
- background:linear-gradient(145deg,#a9c9de,#5b8dab);border:1px solid #e6f7ff;}
+.lsr-hail {color: #ffffff !important;
+    font-family: Arial, sans-serif !important;
+    font-weight: 900 !important;
+    font-style: normal !important;
+    font-size: 18px !important;
+    letter-spacing: 0 !important;
+    text-shadow: none !important;
+    filter: none !important;
+    -webkit-text-stroke: 0 !important;
+    opacity: 1 !important;
+    white-space: nowrap !important;}
 .lsr-fog {color:#d9dce0;text-shadow:0 0 4px #fff,0 0 8px #bfc4ce,0 0 13px #999;
  background:rgba(77,87,99,.78);border:1px solid #a6b0b9;filter:blur(.35px) drop-shadow(0 2px 2px #111);}
 .lsr-rain,.lsr-flood {color:#d3faff;text-shadow:0 1px #115a93,0 2px #07385b;
