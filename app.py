@@ -418,6 +418,31 @@ def regional_storm_reports():
     return reports, datetime.now(timezone.utc).isoformat()
 
 
+def hail_size_label(magnitude, units):
+    """Display a reported hail diameter in inches, or None if unavailable.
+
+    NOAA's LSR layer uses numeric magnitude and a separate units field.
+    Avoid presenting a non-inch value as inches without conversion.
+    """
+    if magnitude is None or str(magnitude).strip() == '':
+        return None
+    raw = str(magnitude).strip().replace(',', '')
+    match = re.fullmatch(r'([0-9]+(?:\.[0-9]+)?)\s*(?:in(?:ches)?|\")?', raw, flags=re.I)
+    if not match:
+        return None
+    value = float(match.group(1))
+    if not 0 < value < 30:
+        return None
+    unit = str(units or '').strip().lower()
+    if unit in ('mm', 'millimeter', 'millimeters'):
+        value /= 25.4
+    elif unit in ('cm', 'centimeter', 'centimeters'):
+        value /= 2.54
+    elif unit not in ('', 'in', 'inch', 'inches', '\"'):
+        return None
+    return f'{value:g}\"'
+
+
 def lsr_style(event):
     """Choose short readable labels and weather-inspired marker classes."""
     event = (event or '').lower()
@@ -516,6 +541,8 @@ def lsr_map(reports):
         if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
             continue
         label, style, category_name = lsr_style(props.get('descript'))
+        if style == 'hail':
+            label = hail_size_label(props.get('magnitude'), props.get('units')) or 'HAIL'
         if category_name not in groups:
             groups[category_name] = folium.FeatureGroup(name=category_name, show=True)
             groups[category_name].add_to(m)
@@ -530,7 +557,7 @@ def lsr_map(reports):
                       + html.escape(occurred) + '</div></div>' + ''.join(
             f'<p><strong>{html.escape(label)}:</strong> {html.escape(str(value))}</p>'
             for label, value in fields if value not in (None, '')) + '</div>')
-        # HTML-escape the displayed word even though labels are currently fixed.
+        # Escape the report-specific hail diameter before inserting it in marker HTML.
         icon_html = f'<span class="lsr-label lsr-{style}">{html.escape(label)}</span>'
         folium.Marker(
             location=[lat, lon],
@@ -568,7 +595,7 @@ def local_storm_reports_panel():
         st.info('NOAA currently returned no storm reports for the selected states in its 24-hour layer.')
     elif mapped < len(reports):
         st.warning(f'{len(reports)-mapped} reports had no usable map coordinates.')
-    st.caption('Click a weather-styled word marker to see when the event occurred (Central Time), its location, magnitude and remarks. Reports are preliminary and may change. At statewide zoom, reports appear as compact colored dots. Zoom in to see the full weather-styled words. Click either marker for report details.')
+    st.caption('Hail markers show reported diameter in inches when NOAA supplies a valid size; otherwise they read HAIL. Click a weather-styled word marker to see when the event occurred (Central Time), its location, magnitude and remarks. Reports are preliminary and may change. At statewide zoom, reports appear as compact colored dots. Zoom in to see the full weather-styled words. Click either marker for report details.')
     st.caption('Source: NOAA/NWS Local Storm Reports ArcGIS service, layer 0 (Last_24_Hours).')
 
 
