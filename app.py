@@ -14,7 +14,13 @@ st.set_page_config(page_title='FAweather | Kansas Weather Alerts', page_icon='�
 # Replace with an email address you control before publishing.
 USER_AGENT = 'FAweather/2.0 (contact: replace-with-your-email@example.com)'
 HEADERS = {'User-Agent': USER_AGENT, 'Accept': 'application/geo+json'}
-KS_BOUNDS = [[36.99, -102.05], [40.01, -94.59]]
+# TEMPORARY TEST SWITCH: set False to restore Kansas-only coverage.
+TEST_THREE_STATES = True
+ACTIVE_STATES = ('KS', 'AZ', 'NM') if TEST_THREE_STATES else ('KS',)
+STATE_NAMES = {'KS': 'Kansas', 'AZ': 'Arizona', 'NM': 'New Mexico'}
+REGION_LABEL = 'Kansas, Arizona & New Mexico' if TEST_THREE_STATES else 'Kansas'
+MAP_BOUNDS = ([[31.2, -109.1], [40.1, -94.5]] if TEST_THREE_STATES
+              else [[36.99, -102.05], [40.01, -94.59]])
 
 CENTRAL = ZoneInfo('America/Chicago')
 
@@ -71,9 +77,9 @@ def lookup_zip(code):
     if not places:
         raise ValueError('ZIP code not found.')
     place = places[0]
-    if place.get('state', '').lower() != 'kansas':
-        raise ValueError('Please enter a Kansas ZIP code.')
-    return {'city': place['place name'], 'zip': code,
+    if place.get('state abbreviation', '').upper() not in ACTIVE_STATES:
+        raise ValueError('Please enter a ZIP code in ' + REGION_LABEL + '.')
+    return {'city': place['place name'], 'state': place.get('state', ''), 'zip': code,
             'lat': float(place['latitude']), 'lon': float(place['longitude'])}
 
 
@@ -231,7 +237,7 @@ def show_alert(feature):
 
 
 def make_warning_map(alerts, loc, radar_frames=None):
-    m = folium.Map(location=[38.5, -98], zoom_start=7, tiles='OpenStreetMap', control_scale=True)
+    m = folium.Map(location=[36.0, -102.0] if TEST_THREE_STATES else [38.5, -98], zoom_start=6 if TEST_THREE_STATES else 7, tiles='OpenStreetMap', control_scale=True)
     # Keep radar as a genuine Folium overlay: visible above OpenStreetMap,
     # below NWS vector polygons, and available in the map's layer selector.
     if radar_frames:
@@ -265,33 +271,35 @@ def make_warning_map(alerts, loc, radar_frames=None):
             name=label,
             style_function=lambda _, c=color: {'color': c, 'weight': 3, 'fillColor': c, 'fillOpacity': 0.30},
             highlight_function=lambda _: {'weight': 5, 'fillOpacity': 0.48},
-            tooltip=f"{p.get('event') or label} — {p.get('areaDesc') or 'Kansas'}",
+            tooltip=f"{p.get('event') or label} — {p.get('areaDesc') or 'Region'}",
             popup=folium.Popup(popup_html, max_width=340),
         ).add_to(m)
         drawn += 1
     folium.Marker([loc['lat'], loc['lon']], tooltip=f"{loc['city']} ({loc['zip']})",
                   icon=folium.Icon(color='blue', icon='home')).add_to(m)
     folium.LayerControl(collapsed=False).add_to(m)
-    m.fit_bounds(KS_BOUNDS)
+    m.fit_bounds(MAP_BOUNDS)
     return m, drawn
 
 
-st.title('🌪️ FAweather | Kansas Severe Weather Center')
+st.title('🌪️ FAweather | Severe Weather Center')
+if TEST_THREE_STATES:
+    st.warning('TEMPORARY TEST MODE: Showing Kansas, Arizona and New Mexico. All displayed times remain Central Time (CST/CDT), including Arizona and New Mexico reports.')
 st.caption('Official NWS alerts • Animated radar + warning polygons on one map • Local forecasts')
 st.markdown('<div class="weather-note">⚠️ This site is supplemental weather information, not an emergency notification system. Keep Wireless Emergency Alerts and NOAA Weather Radio enabled. Always follow official NWS instructions.</div>', unsafe_allow_html=True)
 
 with st.sidebar:
-    st.header('Your Kansas location')
+    st.header('Your location')
     zipcode = st.text_input('ZIP code', '67202', max_chars=5).strip()
     refresh = st.button('Refresh all data', type='primary', width='stretch')
     st.caption('Alerts automatically refresh about every 2 minutes while this page is open. Forecasts refresh every 10 minutes.')
-    st.markdown('[Official NWS Kansas alerts](https://api.weather.gov/alerts/active?area=KS)')
+    st.caption('Coverage: ' + REGION_LABEL)
     st.markdown('[NWS radar viewer](https://radar.weather.gov/)')
 
 if refresh:
     st.cache_data.clear()
 if len(zipcode) != 5 or not zipcode.isdigit():
-    st.info('Enter a valid five-digit Kansas ZIP code.')
+    st.info('Enter a valid five-digit ZIP code.')
     st.stop()
 
 try:
@@ -301,15 +309,23 @@ except (requests.RequestException, KeyError, ValueError, TypeError) as exc:
     st.error(f'Could not load your Kansas location: {exc}')
     st.stop()
 
-st.subheader(f"📍 {loc['city']}, Kansas {loc['zip']}")
+st.subheader(f"📍 {loc['city']}, {loc['state']} {loc['zip']}")
 st.caption(f"NWS forecast office: {point.get('gridId', 'Unknown')}")
 
 
 @st.fragment(run_every='2min')
 def live_warnings():
-    st.subheader('Live Kansas weather warnings')
+    st.subheader('Live weather warnings — ' + REGION_LABEL)
     try:
-        statewide, fetched_at = active_alerts(area='KS')
+        statewide = []
+        fetched_at = None
+        for state_code in ACTIVE_STATES:
+            state_alerts, state_fetched = active_alerts(area=state_code)
+            statewide.extend(state_alerts)
+            fetched_at = state_fetched
+        # Alerts may span state boundaries; avoid double-counting shared NWS alert IDs.
+        statewide = list({a.get('id') or (a.get('properties') or {}).get('id') or str(i): a
+                          for i, a in enumerate(statewide)}.values())
         local, _ = active_alerts(point=f"{loc['lat']:.4f},{loc['lon']:.4f}")
     except requests.RequestException as exc:
         st.error(f'NWS alerts could not be refreshed: {exc}. Do not assume there are no active warnings.')
@@ -321,7 +337,7 @@ def live_warnings():
     counts = {key: sum(category(a)[0] == key for a in statewide) for key in
               ('Tornado warning', 'Severe thunderstorm warning', 'Flash flood warning')}
     cols = st.columns(4)
-    cols[0].metric('All active KS alerts', len(statewide))
+    cols[0].metric('Active regional alerts', len(statewide))
     cols[1].metric('Tornado warnings', counts['Tornado warning'])
     cols[2].metric('Severe T-storm warnings', counts['Severe thunderstorm warning'])
     cols[3].metric('Flash flood warnings', counts['Flash flood warning'])
@@ -357,9 +373,9 @@ def live_warnings():
     else:
         st.info('NWS returned no active alerts for this ZIP-code point. Alerts elsewhere in the ZIP code may differ.')
 
-    with st.expander(f'All Kansas alerts ({len(statewide)})', expanded=False):
+    with st.expander(f'All regional alerts ({len(statewide)})', expanded=False):
         if not statewide:
-            st.info('NWS returned no active Kansas alerts at the last successful check.')
+            st.info('NWS returned no active regional alerts at the last successful check.')
         for a in sorted(statewide, key=lambda f: 0 if 'warning' in ((f.get('properties') or {}).get('event') or '').lower() else 1):
             show_alert(a)
 
@@ -373,14 +389,14 @@ LSR_URL = ('https://mapservices.weather.noaa.gov/vector/rest/services/'
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def kansas_storm_reports():
-    """Read every Kansas feature from NOAA's rolling 24-hour ArcGIS layer."""
+def regional_storm_reports():
+    """Read reports for configured states from NOAA rolling 24-hour layer."""
     reports = []
     offset = 0
     page_size = 1000  # Below NOAA's advertised maxRecordCount of 2000.
     while True:
         params = {
-            'where': "state = 'KS'", 'outFields': '*', 'returnGeometry': 'true',
+            'where': ("state IN ('KS','AZ','NM')" if TEST_THREE_STATES else "state = 'KS'"), 'outFields': '*', 'returnGeometry': 'true',
             'outSR': 4326, 'f': 'json', 'resultOffset': offset,
             'resultRecordCount': page_size, 'orderByFields': 'objectid ASC',
         }
@@ -486,7 +502,7 @@ class LSRZoomMarkers(MacroElement):
 
 
 def lsr_map(reports):
-    m = folium.Map(location=[38.5, -98], zoom_start=7,
+    m = folium.Map(location=[36.0, -102.0] if TEST_THREE_STATES else [38.5, -98], zoom_start=6 if TEST_THREE_STATES else 7,
                    tiles='OpenStreetMap', control_scale=True)
     # The CSS is inserted into the Folium document header, not the Streamlit page.
     from branca.element import Element
@@ -520,36 +536,36 @@ def lsr_map(reports):
             location=[lat, lon],
             icon=folium.DivIcon(html=icon_html, icon_size=(0, 0), icon_anchor=(0, 0),
                                 class_name='lsr-custom-icon'),
-            tooltip=f"{props.get('descript') or 'Report'} — {occurred} — {props.get('loc_desc') or 'Kansas'}",
+            tooltip=f"{props.get('descript') or 'Report'} — {occurred} — {props.get('loc_desc') or 'Region'}",
             popup=folium.Popup(popup_html, max_width=340),
         ).add_to(groups[category_name])
         mapped += 1
     folium.LayerControl(collapsed=True).add_to(m)
     m.add_child(LSRZoomMarkers())
-    m.fit_bounds(KS_BOUNDS)
+    m.fit_bounds(MAP_BOUNDS)
     return m, mapped
 
 
 @st.fragment(run_every='30min')
 def local_storm_reports_panel():
     st.divider()
-    st.subheader('📍 Kansas Local Storm Reports — Last 24 Hours')
+    st.subheader('📍 ' + REGION_LABEL + ' Local Storm Reports — Last 24 Hours')
     st.caption('Separate map of preliminary storm reports from NWS offices. '
                'NOAA updates this service approximately every 30 minutes; '
                'new reports may appear with a delay.')
     try:
-        reports, retrieved = kansas_storm_reports()
+        reports, retrieved = regional_storm_reports()
     except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
         st.error(f'NOAA Local Storm Reports could not be loaded: {exc}. '
                  'This does not mean there were no storm reports.')
         return
     st.caption('Last successful report retrieval: ' +
                central_time(retrieved))
-    st.metric('Kansas storm reports (24 hours)', len(reports))
+    st.metric('Regional storm reports (24 hours)', len(reports))
     m, mapped = lsr_map(reports)
     st_folium(m, width='stretch', height=530, returned_objects=[], key='ks_lsr_map')
     if not reports:
-        st.info('NOAA currently returned no Kansas storm reports in its 24-hour layer.')
+        st.info('NOAA currently returned no storm reports for the selected states in its 24-hour layer.')
     elif mapped < len(reports):
         st.warning(f'{len(reports)-mapped} reports had no usable map coordinates.')
     st.caption('Click a weather-styled word marker to see when the event occurred (Central Time), its location, magnitude and remarks. Reports are preliminary and may change. At statewide zoom, reports appear as compact colored dots. Zoom in to see the full weather-styled words. Click either marker for report details.')
