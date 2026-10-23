@@ -1,6 +1,7 @@
 import html
 import json
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import folium
 import requests
@@ -14,6 +15,36 @@ st.set_page_config(page_title='FAweather | Kansas Weather Alerts', page_icon='�
 USER_AGENT = 'FAweather/2.0 (contact: replace-with-your-email@example.com)'
 HEADERS = {'User-Agent': USER_AGENT, 'Accept': 'application/geo+json'}
 KS_BOUNDS = [[36.99, -102.05], [40.01, -94.59]]
+
+CENTRAL = ZoneInfo('America/Chicago')
+
+
+def central_time(value, include_date=True):
+    """Format UTC/offset timestamps for Kansas visitors, with automatic CST/CDT."""
+    if value is None or value == '':
+        return 'Not specified'
+    try:
+        if isinstance(value, (int, float)):
+            stamp = float(value)
+            # ArcGIS dates are commonly Unix milliseconds.
+            if abs(stamp) > 1e11:
+                stamp /= 1000
+            dt = datetime.fromtimestamp(stamp, tz=timezone.utc)
+        elif isinstance(value, datetime):
+            dt = value
+        else:
+            raw = str(value).strip()
+            if raw.isdigit() and len(raw) in (10, 13):
+                return central_time(int(raw), include_date)
+            dt = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+        if dt.tzinfo is None:
+            # NOAA's timezone-less timestamps are treated as UTC.
+            dt = dt.replace(tzinfo=timezone.utc)
+        fmt = '%b %d, %Y at %I:%M %p %Z' if include_date else '%I:%M %p %Z'
+        return dt.astimezone(CENTRAL).strftime(fmt).replace(' at 0', ' at ').lstrip('0')
+    except (ValueError, TypeError, OverflowError, OSError):
+        return str(value) + ' (time format unrecognized)'
+
 
 st.markdown('''<style>
 .stApp {background: #0b1423; color: #e9f1fb;}
@@ -79,7 +110,7 @@ def radar_history():
         stamp = frame.get('time')
         if path.startswith('/v2/radar/') and isinstance(stamp, (int, float)):
             result.append({'url': host + path + '/256/{z}/{x}/{y}/2/1_1.png',
-                           'label': datetime.fromtimestamp(stamp, timezone.utc).strftime('%H:%M UTC'),
+                           'label': central_time(stamp, include_date=False),
                            'time': stamp})
     if not result:
         raise ValueError('No radar frames currently available')
@@ -186,7 +217,7 @@ def show_alert(feature):
     tag = elevated_tag(feature)
     title = p.get('event') or label
     st.markdown(f'**{title}**' + (f' — **{tag}**' if tag else ''))
-    st.caption(f"{p.get('areaDesc') or 'Area not specified'} | Ends: {p.get('ends') or p.get('expires') or 'Not specified'}")
+    st.caption(f"{p.get('areaDesc') or 'Area not specified'} | Ends: {central_time(p.get('ends') or p.get('expires'))}")
     if p.get('headline'):
         st.write(p['headline'])
     with st.expander('Full alert text and safety instructions'):
@@ -225,7 +256,7 @@ def make_warning_map(alerts, loc, radar_frames=None):
         label, color = category(feature)
         title = html.escape(p.get('event') or label)
         area = html.escape(p.get('areaDesc') or 'Area not specified')
-        ends = html.escape(str(p.get('ends') or p.get('expires') or 'Unknown'))
+        ends = html.escape(central_time(p.get('ends') or p.get('expires')))
         tag = elevated_tag(feature)
         special = f'<p><strong>{html.escape(tag)}</strong></p>' if tag else ''
         popup_html = f'<div style="width:300px"><h4>{title}</h4>{special}<p>{area}</p><p>Ends: {ends}</p></div>'
@@ -285,7 +316,7 @@ def live_warnings():
         st.markdown('[Check the official NWS alerts](https://www.weather.gov/)')
         return
 
-    fetched = datetime.fromisoformat(fetched_at).astimezone().strftime('%b %d, %Y at %I:%M:%S %p %Z')
+    fetched = central_time(fetched_at)
     st.caption(f'Last successful NWS alert fetch: {fetched} • Automatic check approximately every 2 minutes while open')
     counts = {key: sum(category(a)[0] == key for a in statewide) for key in
               ('Tornado warning', 'Severe thunderstorm warning', 'Flash flood warning')}
@@ -308,8 +339,8 @@ def live_warnings():
     except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
         st.warning(f'Radar imagery is temporarily unavailable ({exc}). NWS warnings are still displayed.')
     if frames:
-        first = datetime.fromtimestamp(frames[0]['time'], timezone.utc).strftime('%b %d, %Y %H:%M UTC')
-        last = datetime.fromtimestamp(frames[-1]['time'], timezone.utc).strftime('%b %d, %Y %H:%M UTC')
+        first = central_time(frames[0]['time'])
+        last = central_time(frames[-1]['time'])
         st.caption(f'Radar history: {first} to {last} • {len(frames)} frames • Use ▶ Play, ❚❚ Pause or the timeline **inside the map**. Frames can be delayed.')
     m, drawn = make_warning_map(statewide, loc, frames)
     st_folium(m, width='stretch', height=600, returned_objects=[], key='ks_warning_map')
@@ -403,7 +434,7 @@ def lsr_map(reports):
             groups[category_name].add_to(m)
         magnitude = ' '.join(str(props.get(k) or '').strip() for k in ('magnitude', 'units')).strip()
         fields = [('Event', props.get('descript')), ('Location', props.get('loc_desc')),
-                  ('Magnitude', magnitude), ('Report time (UTC)', props.get('valid_time')),
+                  ('Magnitude', magnitude), ('Report time (Central)', central_time(props.get('valid_time'))),
                   ('NWS office', props.get('wfo_id')), ('Remarks', props.get('remarks'))]
         popup_html = '<div style="width:300px">' + ''.join(
             f'<p><strong>{html.escape(label)}:</strong> {html.escape(str(value))}</p>'
@@ -434,7 +465,7 @@ def local_storm_reports_panel():
                  'This does not mean there were no storm reports.')
         return
     st.caption('Last successful report retrieval: ' +
-               datetime.fromisoformat(retrieved).strftime('%b %d, %Y %H:%M UTC'))
+               central_time(retrieved))
     st.metric('Kansas storm reports (24 hours)', len(reports))
     m, mapped = lsr_map(reports)
     st_folium(m, width='stretch', height=530, returned_objects=[], key='ks_lsr_map')
@@ -474,7 +505,7 @@ else:
         rows = []
         for p in hourly[:count]:
             pop = (p.get('probabilityOfPrecipitation') or {}).get('value')
-            rows.append({'Time': p.get('startTime', '')[:16].replace('T', ' '),
+            rows.append({'Time': central_time(p.get('startTime')),
                          'Temp': f"{p.get('temperature', '—')}°{p.get('temperatureUnit', 'F')}",
                          'Conditions': p.get('shortForecast', '—'),
                          'Rain chance': f'{pop}%' if pop is not None else '—',
@@ -483,4 +514,5 @@ else:
 
 st.divider()
 st.markdown('[Radar imagery by RainViewer](https://www.rainviewer.com/) · [Official NWS radar](https://radar.weather.gov/)')
+st.caption('All displayed times use U.S. Central Time (CST/CDT), adjusted automatically for daylight saving time.')
 st.caption('Sources: U.S. National Weather Service API (weather.gov), RainViewer radar (rainviewer.com), Zippopotam.us, OpenStreetMap. Data and network availability may be delayed. No guarantees of continuous monitoring or alert delivery. Not affiliated with NOAA or the NWS.')
