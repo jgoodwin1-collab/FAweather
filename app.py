@@ -403,23 +403,94 @@ def kansas_storm_reports():
 
 
 def lsr_style(event):
+    """Choose short readable labels and weather-inspired marker classes."""
     event = (event or '').lower()
     if 'tornado' in event or 'landspout' in event:
-        return '#ff4055', 'Tornado'
+        return 'TORNADO', 'tornado', 'Tornado'
     if 'hail' in event:
-        return '#46d67b', 'Hail'
+        return 'HAIL', 'hail', 'Hail'
+    if 'fog' in event:
+        return 'FOG', 'fog', 'Fog'
+    if 'thunder' in event or 'lightning' in event:
+        return 'STORM', 'storm', 'Thunder / Lightning'
     if 'wind' in event or 'wnd' in event or 'downburst' in event:
-        return '#f5aa40', 'Wind'
-    if 'flood' in event or 'rain' in event:
-        return '#55a6ff', 'Flood / Rain'
-    if 'snow' in event or 'blizzard' in event or 'ice' in event:
-        return '#b8b2ff', 'Winter'
-    return '#b4c4d5', 'Other'
+        return 'WIND', 'wind', 'Wind'
+    if 'flood' in event:
+        return 'FLOOD', 'flood', 'Flood'
+    if 'rain' in event:
+        return 'RAIN', 'rain', 'Rain'
+    if 'blizzard' in event:
+        return 'BLIZZARD', 'snow', 'Winter'
+    if 'snow' in event:
+        return 'SNOW', 'snow', 'Winter'
+    if 'ice' in event or 'sleet' in event or 'freezing' in event:
+        return 'ICE', 'ice', 'Winter'
+    if 'dust' in event:
+        return 'DUST', 'fog', 'Dust'
+    return 'REPORT', 'other', 'Other'
+
+
+# Styles are scoped to the LSR map's marker icons; the radar map is unchanged.
+LSR_MARKER_CSS = r"""
+<style>
+.lsr-label {position:relative;display:inline-block;white-space:nowrap;transform:translate(-50%,-50%);
+ font-family:Impact,'Arial Black',sans-serif;font-size:16px;font-weight:900;letter-spacing:.6px;
+ line-height:1.15;padding:4px 7px;border-radius:6px;pointer-events:auto;
+ filter:drop-shadow(0 2px 2px rgba(0,0,0,.9));}
+.lsr-label::after {content:'';position:absolute;left:50%;bottom:-5px;transform:translateX(-50%);
+ width:6px;height:6px;border-radius:50%;background:#fff;border:1px solid #152238;}
+.lsr-hail {color:#fff;text-shadow:1px 1px #90b6d1,-1px -1px #dcefff,2px 3px #537a9a;
+ background:linear-gradient(145deg,#a9c9de,#5b8dab);border:1px solid #e6f7ff;}
+.lsr-fog {color:#d9dce0;text-shadow:0 0 4px #fff,0 0 8px #bfc4ce,0 0 13px #999;
+ background:rgba(77,87,99,.78);border:1px solid #a6b0b9;filter:blur(.35px) drop-shadow(0 2px 2px #111);}
+.lsr-rain,.lsr-flood {color:#d3faff;text-shadow:0 1px #115a93,0 2px #07385b;
+ background:linear-gradient(145deg,#42c6ed,#0874b6 65%,#045177);border:1px solid #8fe5ff;}
+.lsr-tornado {color:#fff2f2;text-shadow:1px 2px #7c1727,2px 3px #450813;
+ background:linear-gradient(120deg,#f85165,#9b172c);border:1px solid #ffadb5;transform:translate(-50%,-50%) skew(-6deg);}
+.lsr-wind {color:#fff2d4;text-shadow:2px 1px #95501b;
+ background:linear-gradient(110deg,#f7bd64,#bf681f);border:1px solid #ffdc9a;transform:translate(-50%,-50%) skew(-8deg);}
+.lsr-snow,.lsr-ice {color:#f5fcff;text-shadow:1px 2px #638bb6;
+ background:linear-gradient(135deg,#d2edff,#809fc9);border:1px solid #fff;}
+.lsr-storm {color:#ffe66b;text-shadow:2px 2px #7c4a00;
+ background:linear-gradient(135deg,#4c428e,#25244b);border:1px solid #b5a4ff;}
+.lsr-other {color:#fff;background:#556779;border:1px solid #c4d1df;}
+/* Compact colored report markers at statewide zoom; full weather words on zoom-in. */
+.lsr-compact .lsr-label {font-size:0 !important;letter-spacing:0;padding:0;width:13px;height:13px;
+ box-sizing:border-box;border-radius:50%;transform:translate(-50%,-50%) !important;
+ text-shadow:none !important;filter:drop-shadow(0 1px 2px #111) !important;}
+.lsr-compact .lsr-label::after {display:none;}
+.lsr-compact .lsr-label:hover {outline:2px solid #fff;outline-offset:2px;}
+</style>
+"""
+
+
+class LSRZoomMarkers(MacroElement):
+    """Switch only LSR icons between dots and full labels as Leaflet zoom changes."""
+    _template = Template(r"""
+    {% macro script(this, kwargs) %}
+    (function () {
+      var map = {{this._parent.get_name()}};
+      function updateLabels() {
+        var container = map.getContainer();
+        if (map.getZoom() <= 7) container.classList.add('lsr-compact');
+        else container.classList.remove('lsr-compact');
+      }
+      map.on('zoomend', updateLabels);
+      updateLabels();
+    })();
+    {% endmacro %}
+    """)
+    def __init__(self):
+        super().__init__()
+        self._name = 'LSRZoomMarkers'
 
 
 def lsr_map(reports):
     m = folium.Map(location=[38.5, -98], zoom_start=7,
                    tiles='OpenStreetMap', control_scale=True)
+    # The CSS is inserted into the Folium document header, not the Streamlit page.
+    from branca.element import Element
+    m.get_root().header.add_child(Element(LSR_MARKER_CSS))
     groups = {}
     mapped = 0
     for report in reports:
@@ -428,25 +499,33 @@ def lsr_map(reports):
         lon, lat = geom.get('x'), geom.get('y')
         if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
             continue
-        color, category_name = lsr_style(props.get('descript'))
+        label, style, category_name = lsr_style(props.get('descript'))
         if category_name not in groups:
             groups[category_name] = folium.FeatureGroup(name=category_name, show=True)
             groups[category_name].add_to(m)
         magnitude = ' '.join(str(props.get(k) or '').strip() for k in ('magnitude', 'units')).strip()
+        occurred = central_time(props.get('valid_time'))
         fields = [('Event', props.get('descript')), ('Location', props.get('loc_desc')),
-                  ('Magnitude', magnitude), ('Report time (Central)', central_time(props.get('valid_time'))),
-                  ('NWS office', props.get('wfo_id')), ('Remarks', props.get('remarks'))]
-        popup_html = '<div style="width:300px">' + ''.join(
+                  ('Magnitude', magnitude), ('NWS office', props.get('wfo_id')),
+                  ('Remarks', props.get('remarks'))]
+        popup_html = ('<div style="width:300px;font:14px Arial,sans-serif">'
+                      '<div style="padding:9px;background:#e7f2fc;border-radius:5px;">'
+                      '<strong>EVENT OCCURRED</strong><div style="font-size:17px;font-weight:bold;">'
+                      + html.escape(occurred) + '</div></div>' + ''.join(
             f'<p><strong>{html.escape(label)}:</strong> {html.escape(str(value))}</p>'
-            for label, value in fields if value not in (None, '')) + '</div>'
-        folium.CircleMarker(
-            location=[lat, lon], radius=7, color='#101827', weight=1.5,
-            fill=True, fill_color=color, fill_opacity=0.95,
-            tooltip=f"{props.get('descript') or 'Report'} — {props.get('loc_desc') or 'Kansas'}",
+            for label, value in fields if value not in (None, '')) + '</div>')
+        # HTML-escape the displayed word even though labels are currently fixed.
+        icon_html = f'<span class="lsr-label lsr-{style}">{html.escape(label)}</span>'
+        folium.Marker(
+            location=[lat, lon],
+            icon=folium.DivIcon(html=icon_html, icon_size=(0, 0), icon_anchor=(0, 0),
+                                class_name='lsr-custom-icon'),
+            tooltip=f"{props.get('descript') or 'Report'} — {occurred} — {props.get('loc_desc') or 'Kansas'}",
             popup=folium.Popup(popup_html, max_width=340),
         ).add_to(groups[category_name])
         mapped += 1
     folium.LayerControl(collapsed=True).add_to(m)
+    m.add_child(LSRZoomMarkers())
     m.fit_bounds(KS_BOUNDS)
     return m, mapped
 
@@ -473,9 +552,7 @@ def local_storm_reports_panel():
         st.info('NOAA currently returned no Kansas storm reports in its 24-hour layer.')
     elif mapped < len(reports):
         st.warning(f'{len(reports)-mapped} reports had no usable map coordinates.')
-    st.caption('Select colored dots to read the event, location, magnitude, time and remarks. '
-               'Red: tornado · Green: hail · Orange: wind · Blue: rain/flood · '
-               'Purple: winter weather · Gray: other. Reports are preliminary and may change.')
+    st.caption('Click a weather-styled word marker to see when the event occurred (Central Time), its location, magnitude and remarks. Reports are preliminary and may change. At statewide zoom, reports appear as compact colored dots. Zoom in to see the full weather-styled words. Click either marker for report details.')
     st.caption('Source: NOAA/NWS Local Storm Reports ArcGIS service, layer 0 (Last_24_Hours).')
 
 
