@@ -335,6 +335,122 @@ def live_warnings():
 
 live_warnings()
 
+
+# Independent NOAA Local Storm Reports map (24-hour service layer).
+LSR_URL = ('https://mapservices.weather.noaa.gov/vector/rest/services/'
+           'obs/nws_local_storm_reports/MapServer/0/query')
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def kansas_storm_reports():
+    """Read every Kansas feature from NOAA's rolling 24-hour ArcGIS layer."""
+    reports = []
+    offset = 0
+    page_size = 1000  # Below NOAA's advertised maxRecordCount of 2000.
+    while True:
+        params = {
+            'where': "state = 'KS'", 'outFields': '*', 'returnGeometry': 'true',
+            'outSR': 4326, 'f': 'json', 'resultOffset': offset,
+            'resultRecordCount': page_size, 'orderByFields': 'objectid ASC',
+        }
+        response = requests.get(LSR_URL, params=params, timeout=30,
+                                headers={'User-Agent': USER_AGENT})
+        response.raise_for_status()
+        data = response.json()
+        if 'error' in data:
+            raise ValueError(str(data['error'].get('message', 'NOAA query failed')))
+        batch = data.get('features', [])
+        reports.extend(batch)
+        if len(batch) < page_size and not data.get('exceededTransferLimit'):
+            break
+        if not batch:
+            break
+        offset += len(batch)
+        if offset > 50000:
+            raise ValueError('Unexpectedly large NOAA result set; report list incomplete')
+    return reports, datetime.now(timezone.utc).isoformat()
+
+
+def lsr_style(event):
+    event = (event or '').lower()
+    if 'tornado' in event or 'landspout' in event:
+        return '#ff4055', 'Tornado'
+    if 'hail' in event:
+        return '#46d67b', 'Hail'
+    if 'wind' in event or 'wnd' in event or 'downburst' in event:
+        return '#f5aa40', 'Wind'
+    if 'flood' in event or 'rain' in event:
+        return '#55a6ff', 'Flood / Rain'
+    if 'snow' in event or 'blizzard' in event or 'ice' in event:
+        return '#b8b2ff', 'Winter'
+    return '#b4c4d5', 'Other'
+
+
+def lsr_map(reports):
+    m = folium.Map(location=[38.5, -98], zoom_start=7,
+                   tiles='OpenStreetMap', control_scale=True)
+    groups = {}
+    mapped = 0
+    for report in reports:
+        props = report.get('attributes') or {}
+        geom = report.get('geometry') or {}
+        lon, lat = geom.get('x'), geom.get('y')
+        if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
+            continue
+        color, category_name = lsr_style(props.get('descript'))
+        if category_name not in groups:
+            groups[category_name] = folium.FeatureGroup(name=category_name, show=True)
+            groups[category_name].add_to(m)
+        magnitude = ' '.join(str(props.get(k) or '').strip() for k in ('magnitude', 'units')).strip()
+        fields = [('Event', props.get('descript')), ('Location', props.get('loc_desc')),
+                  ('Magnitude', magnitude), ('Report time (UTC)', props.get('valid_time')),
+                  ('NWS office', props.get('wfo_id')), ('Remarks', props.get('remarks'))]
+        popup_html = '<div style="width:300px">' + ''.join(
+            f'<p><strong>{html.escape(label)}:</strong> {html.escape(str(value))}</p>'
+            for label, value in fields if value not in (None, '')) + '</div>'
+        folium.CircleMarker(
+            location=[lat, lon], radius=7, color='#101827', weight=1.5,
+            fill=True, fill_color=color, fill_opacity=0.95,
+            tooltip=f"{props.get('descript') or 'Report'} — {props.get('loc_desc') or 'Kansas'}",
+            popup=folium.Popup(popup_html, max_width=340),
+        ).add_to(groups[category_name])
+        mapped += 1
+    folium.LayerControl(collapsed=True).add_to(m)
+    m.fit_bounds(KS_BOUNDS)
+    return m, mapped
+
+
+@st.fragment(run_every='30min')
+def local_storm_reports_panel():
+    st.divider()
+    st.subheader('📍 Kansas Local Storm Reports — Last 24 Hours')
+    st.caption('Separate map of preliminary storm reports from NWS offices. '
+               'NOAA updates this service approximately every 30 minutes; '
+               'new reports may appear with a delay.')
+    try:
+        reports, retrieved = kansas_storm_reports()
+    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+        st.error(f'NOAA Local Storm Reports could not be loaded: {exc}. '
+                 'This does not mean there were no storm reports.')
+        return
+    st.caption('Last successful report retrieval: ' +
+               datetime.fromisoformat(retrieved).strftime('%b %d, %Y %H:%M UTC'))
+    st.metric('Kansas storm reports (24 hours)', len(reports))
+    m, mapped = lsr_map(reports)
+    st_folium(m, width='stretch', height=530, returned_objects=[], key='ks_lsr_map')
+    if not reports:
+        st.info('NOAA currently returned no Kansas storm reports in its 24-hour layer.')
+    elif mapped < len(reports):
+        st.warning(f'{len(reports)-mapped} reports had no usable map coordinates.')
+    st.caption('Select colored dots to read the event, location, magnitude, time and remarks. '
+               'Red: tornado · Green: hail · Orange: wind · Blue: rain/flood · '
+               'Purple: winter weather · Gray: other. Reports are preliminary and may change.')
+    st.caption('Source: NOAA/NWS Local Storm Reports ArcGIS service, layer 0 (Last_24_Hours).')
+
+
+local_storm_reports_panel()
+
+
 st.subheader('Local weather forecast')
 try:
     daily = nws_forecast(point['forecast'])
