@@ -821,11 +821,92 @@ class RainZoomLabels(MacroElement):
         self._name = 'RainZoomLabels'
 
 
+# Experimental rainfall analysis. Interpolation is limited to the observation
+# network; colored areas are estimates, NOT measured rainfall at every point.
+def rainfall_contour_overlay(reports):
+    import base64
+    import io as _io
+    import numpy as np
+    from scipy.interpolate import LinearNDInterpolator
+    from scipy.spatial import cKDTree, QhullError
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.colors import ListedColormap, BoundaryNorm
+
+    # Average duplicate coordinates to avoid triangulation failures.
+    locations = {}
+    for r in reports:
+        key = (round(r['lon'], 5), round(r['lat'], 5))
+        locations.setdefault(key, []).append(r['amount'])
+    if len(locations) < 3:
+        return None, 'At least three distinct rainfall stations are needed for contours.'
+    points = np.asarray(list(locations), dtype=float)
+    values = np.asarray([sum(v) / len(v) for v in locations.values()], dtype=float)
+    if max(values) < 0.25:
+        return None, 'All reported totals are below 0.25 inch; no requested contours to draw.'
+    try:
+        interp = LinearNDInterpolator(points, values, fill_value=np.nan)
+    except (QhullError, ValueError):
+        return None, 'Station locations do not support a reliable triangulation.'
+
+    west, east, south, north = -102.05, -94.59, 36.99, 40.01
+    nx, ny = 850, 450
+    xs = np.linspace(west, east, nx)
+    ys = np.linspace(south, north, ny)
+    xx, yy = np.meshgrid(xs, ys)
+    rainfall = interp(xx, yy)
+    # Prevent unsupported color extrapolation across large gaps in the network.
+    nearest_distance, _ = cKDTree(points).query(np.column_stack((xx.ravel(), yy.ravel())))
+    rainfall[nearest_distance.reshape(xx.shape) > 0.65] = np.nan
+    rainfall = np.ma.masked_invalid(rainfall)
+    if rainfall.count() == 0:
+        return None, 'No supported interpolation area was available.'
+
+    thresholds = [0.25, 0.5, 1.0]
+    thresholds.extend(float(i) for i in range(2, max(3, int(np.ceil(max(values))) + 1)))
+    # The last bin catches all rainfall above the highest displayed threshold.
+    levels = [0.0] + thresholds + [max(float(max(values)) + 1, thresholds[-1] + 1)]
+    palette = ['#f4f7fb', '#c6e8f9', '#89cafa', '#3e9adb', '#1672b6',
+               '#156c79', '#35a052', '#9bbd3b', '#f1cf4c', '#e88d35',
+               '#cf4c49', '#9b4599', '#66388d']
+    if len(levels) - 1 > len(palette):
+        palette += [palette[-1]] * (len(levels) - 1 - len(palette))
+    cmap = ListedColormap(palette[:len(levels)-1])
+    cmap.set_bad((0, 0, 0, 0))
+    norm = BoundaryNorm(levels, cmap.N)
+
+    fig = Figure(figsize=(10, 5), dpi=130, facecolor='none')
+    FigureCanvasAgg(fig)
+    ax = fig.add_axes((0, 0, 1, 1))
+    ax.set_xlim(west, east)
+    ax.set_ylim(south, north)
+    ax.axis('off')
+    ax.contourf(xx, yy, rainfall, levels=levels, cmap=cmap, norm=norm,
+                antialiased=True, alpha=0.55)
+    visible_levels = [v for v in thresholds if v <= float(rainfall.max())]
+    if visible_levels:
+        ax.contour(xx, yy, rainfall, levels=visible_levels,
+                   colors='#173d61', linewidths=0.8, alpha=0.8)
+    png = _io.BytesIO()
+    fig.savefig(png, format='png', dpi=130, transparent=True, pad_inches=0)
+    uri = 'data:image/png;base64,' + base64.b64encode(png.getvalue()).decode('ascii')
+    return (uri, [[south, west], [north, east]]), None
+
+
 def make_cocorahs_map(reports):
     from branca.element import Element
     m = folium.Map(location=[38.5, -98], zoom_start=7,
                    tiles='OpenStreetMap', control_scale=True)
     m.get_root().header.add_child(Element(RAIN_MARKER_CSS))
+    try:
+        contour, contour_note = rainfall_contour_overlay(reports)
+    except Exception as exc:
+        contour, contour_note = None, f'Contour analysis unavailable: {type(exc).__name__}'
+    if contour:
+        folium.raster_layers.ImageOverlay(
+            image=contour[0], bounds=contour[1], name='Estimated rainfall contours',
+            opacity=1, interactive=False, cross_origin=False, show=True,
+        ).add_to(m)
     layer = folium.FeatureGroup(name='CoCoRaHS rainfall totals', show=True).add_to(m)
     for item in reports:
         amount = item['amount']
@@ -852,7 +933,7 @@ def make_cocorahs_map(reports):
     folium.LayerControl(collapsed=True).add_to(m)
     m.add_child(RainZoomLabels())
     m.fit_bounds([[36.99, -102.05], [40.01, -94.59]])
-    return m
+    return m, contour_note
 
 
 @st.fragment(run_every='30min')
@@ -877,8 +958,19 @@ def cocorahs_rainfall_panel():
     st.caption('Zoomed out: blue station dots. Zoom in past level 8: labels show rainfall '
                'rounded to one decimal inch. Click a marker for the reported value '
                'to two decimals and station details. T indicates trace precipitation.')
-    st_folium(make_cocorahs_map(reports), width='stretch', height=550,
+    rain_map, contour_note = make_cocorahs_map(reports)
+    if contour_note:
+        st.info(contour_note)
+    st.caption('**Experimental estimated rainfall contours:** 0.25", 0.50", 1.0", '
+               'then 2.0", 3.0", 4.0" and higher in 1-inch steps as needed. '
+               'Light colors indicate lower totals; deeper blues, greens, yellows, '
+               'oranges, reds and purples indicate higher totals. Dark lines mark thresholds. '
+               'Turn the contour layer on/off in the map layer menu.')
+    st_folium(rain_map, width='stretch', height=550,
               returned_objects=[], key='ks_cocorahs_rainfall_map')
+    st.caption('Contour shading is interpolated between stations and is not a direct '
+               'measurement. Areas outside the supported gauge network are left unshaded; '
+               'localized rainfall maxima/minima may be missed.')
     st.caption('Source: CoCoRaHS volunteer daily precipitation observations. '
                'Reports are station measurements and may not represent conditions between gauges.')
 

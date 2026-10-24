@@ -3,3 +3,6 @@ folium
 streamlit-folium
 requests
 branca
+numpy
+scipy
+matplotlib
