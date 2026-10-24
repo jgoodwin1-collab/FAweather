@@ -17,6 +17,10 @@ USER_AGENT = 'FAweather/2.0 (contact: replace-with-your-email@example.com)'
 HEADERS = {'User-Agent': USER_AGENT, 'Accept': 'application/geo+json'}
 # TEMPORARY TEST SWITCH: set False to restore Kansas-only coverage.
 TEST_THREE_STATES = True
+# TEMPORARY LSR HISTORY: set False to restore the original 24-hour reports.
+TEST_LSR_72_HOURS = True
+LSR_HOURS = 72 if TEST_LSR_72_HOURS else 24
+LSR_LAYER_ID = 2 if TEST_LSR_72_HOURS else 0
 ACTIVE_STATES = ('KS', 'AZ', 'NM') if TEST_THREE_STATES else ('KS',)
 STATE_NAMES = {'KS': 'Kansas', 'AZ': 'Arizona', 'NM': 'New Mexico'}
 REGION_LABEL = 'Kansas, Arizona & New Mexico' if TEST_THREE_STATES else 'Kansas'
@@ -286,6 +290,8 @@ def make_warning_map(alerts, loc, radar_frames=None):
 st.title('🌪️ FAweather | Severe Weather Center')
 if TEST_THREE_STATES:
     st.warning('TEMPORARY TEST MODE: Showing Kansas, Arizona and New Mexico. All displayed times remain Central Time (CST/CDT), including Arizona and New Mexico reports.')
+if TEST_LSR_72_HOURS:
+    st.info('TEMPORARY LSR TEST: Showing 72 hours of storm reports. Change TEST_LSR_72_HOURS to False to restore 24 hours.')
 st.caption('Official NWS alerts • Animated radar + warning polygons on one map • Local forecasts')
 st.markdown('<div class="weather-note">⚠️ This site is supplemental weather information, not an emergency notification system. Keep Wireless Emergency Alerts and NOAA Weather Radio enabled. Always follow official NWS instructions.</div>', unsafe_allow_html=True)
 
@@ -384,14 +390,14 @@ def live_warnings():
 live_warnings()
 
 
-# Independent NOAA Local Storm Reports map (24-hour service layer).
+# Independent NOAA Local Storm Reports map (24-hour or 72-hour service layer).
 LSR_URL = ('https://mapservices.weather.noaa.gov/vector/rest/services/'
-           'obs/nws_local_storm_reports/MapServer/0/query')
+           f'obs/nws_local_storm_reports/MapServer/{LSR_LAYER_ID}/query')
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def regional_storm_reports():
-    """Read reports for configured states from NOAA rolling 24-hour layer."""
+    """Read reports for configured states from NOAA selected rolling-hours layer."""
     reports = []
     offset = 0
     page_size = 1000  # Below NOAA's advertised maxRecordCount of 2000.
@@ -481,21 +487,16 @@ LSR_MARKER_CSS = r"""
  filter:drop-shadow(0 2px 2px rgba(0,0,0,.9));}
 .lsr-label::after {content:'';position:absolute;left:50%;bottom:-5px;transform:translateX(-50%);
  width:6px;height:6px;border-radius:50%;background:#fff;border:1px solid #152238;}
-.lsr-hail {color: #ffffff !important;
-    font-family: Arial, sans-serif !important;
-    font-weight: 900 !important;
-    font-style: normal !important;
-    font-size: 18px !important;
-    letter-spacing: 0 !important;
-    text-shadow: none !important;
-    filter: none !important;
-    -webkit-text-stroke: 0 !important;
-    opacity: 1 !important;
-    white-space: nowrap !important;}
+/* Hail diameter: exact original FLOOD styling, including its blue background. */
+.lsr-hail {color:#d3faff;text-shadow:0 1px #115a93,0 2px #07385b;
+ background:linear-gradient(145deg,#42c6ed,#0874b6 65%,#045177);border:1px solid #8fe5ff;}
 .lsr-fog {color:#d9dce0;text-shadow:0 0 4px #fff,0 0 8px #bfc4ce,0 0 13px #999;
  background:rgba(77,87,99,.78);border:1px solid #a6b0b9;filter:blur(.35px) drop-shadow(0 2px 2px #111);}
-.lsr-rain,.lsr-flood {color:#d3faff;text-shadow:0 1px #115a93,0 2px #07385b;
+/* Keep RAIN unchanged; make FLOOD distinctly darker than the hail labels. */
+.lsr-rain {color:#d3faff;text-shadow:0 1px #115a93,0 2px #07385b;
  background:linear-gradient(145deg,#42c6ed,#0874b6 65%,#045177);border:1px solid #8fe5ff;}
+.lsr-flood {color:#e3f7ff;text-shadow:0 1px #06385c,0 2px #04223d;
+ background:linear-gradient(145deg,#2475b6,#104578 65%,#082a4d);border:1px solid #6bbce9;}
 .lsr-tornado {color:#fff2f2;text-shadow:1px 2px #7c1727,2px 3px #450813;
  background:linear-gradient(120deg,#f85165,#9b172c);border:1px solid #ffadb5;transform:translate(-50%,-50%) skew(-6deg);}
 .lsr-wind {color:#fff2d4;text-shadow:2px 1px #95501b;
@@ -586,8 +587,8 @@ def lsr_map(reports):
 @st.fragment(run_every='30min')
 def local_storm_reports_panel():
     st.divider()
-    st.subheader('📍 ' + REGION_LABEL + ' Local Storm Reports — Last 24 Hours')
-    st.caption('Separate map of preliminary storm reports from NWS offices. '
+    st.subheader('📍 ' + REGION_LABEL + f' Local Storm Reports — Last {LSR_HOURS} Hours')
+    st.caption(f'Separate map of preliminary storm reports from NWS offices, covering the last {LSR_HOURS} hours. '
                'NOAA updates this service approximately every 30 minutes; '
                'new reports may appear with a delay.')
     try:
@@ -598,15 +599,15 @@ def local_storm_reports_panel():
         return
     st.caption('Last successful report retrieval: ' +
                central_time(retrieved))
-    st.metric('Regional storm reports (24 hours)', len(reports))
+    st.metric(f'Regional storm reports ({LSR_HOURS} hours)', len(reports))
     m, mapped = lsr_map(reports)
     st_folium(m, width='stretch', height=530, returned_objects=[], key='ks_lsr_map')
     if not reports:
-        st.info('NOAA currently returned no storm reports for the selected states in its 24-hour layer.')
+        st.info(f'NOAA currently returned no storm reports for the selected states in its {LSR_HOURS}-hour layer.')
     elif mapped < len(reports):
         st.warning(f'{len(reports)-mapped} reports had no usable map coordinates.')
-    st.caption('Hail markers show reported diameter in inches when NOAA supplies a valid size; otherwise they read HAIL. Click a weather-styled word marker to see when the event occurred (Central Time), its location, magnitude and remarks. Reports are preliminary and may change. At statewide zoom, reports appear as compact colored dots. Zoom in to see the full weather-styled words. Click either marker for report details.')
-    st.caption('Source: NOAA/NWS Local Storm Reports ArcGIS service, layer 0 (Last_24_Hours).')
+    st.caption('Hail markers use the original blue FLOOD style and display reported diameter in inches when NOAA supplies a valid size; otherwise they read HAIL. Click a weather-styled word marker to see when the event occurred (Central Time), its location, magnitude and remarks. Reports are preliminary and may change. At statewide zoom, reports appear as compact colored dots. Zoom in to see the full weather-styled words. Click either marker for report details.')
+    st.caption(f'Source: NOAA/NWS Local Storm Reports ArcGIS service, layer {LSR_LAYER_ID} (Last_{LSR_HOURS}_Hours).')
 
 
 local_storm_reports_panel()

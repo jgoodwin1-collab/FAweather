@@ -1,4 +1,5 @@
-streamlit>=1.40
-requests>=2.32
-folium>=0.17
-streamlit-folium>=0.24
+streamlit
+folium
+streamlit-folium
+requests
+branca
