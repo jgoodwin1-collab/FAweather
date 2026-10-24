@@ -450,6 +450,40 @@ def hail_size_label(magnitude, units):
     return f'{value:g}\"'
 
 
+
+def wind_speed_label(magnitude, units):
+    """Show a reported wind speed in mph; never infer speed from damage text.
+
+    ArcGIS magnitude is normally numeric with a separate units field.
+    Convert knots, km/h and m/s when explicitly identified.
+    """
+    if magnitude is None or str(magnitude).strip() == '':
+        return None
+    raw = str(magnitude).strip().replace(',', '')
+    match = re.fullmatch(
+        r'([0-9]+(?:\.[0-9]+)?)\s*(mph|mi/h|kt|kts|knots?|km/h|kph|m/s)?',
+        raw, flags=re.I)
+    if not match:
+        return None
+    speed = float(match.group(1))
+    inline_unit = (match.group(2) or '').lower()
+    field_unit = str(units or '').strip().lower()
+    unit = inline_unit or field_unit
+    if unit in ('', 'mph', 'mi/h', 'miles per hour', 'mile per hour'):
+        pass
+    elif unit in ('kt', 'kts', 'knot', 'knots'):
+        speed *= 1.150779448
+    elif unit in ('km/h', 'kph', 'kmh', 'kilometers per hour'):
+        speed *= 0.621371192
+    elif unit in ('m/s', 'meters per second'):
+        speed *= 2.236936292
+    else:
+        return None
+    if not 0 < speed <= 350:
+        return None
+    return f'{speed:.0f}mph'
+
+
 def lsr_style(event):
     """Choose short readable labels and weather-inspired marker classes."""
     event = (event or '').lower()
@@ -554,6 +588,8 @@ def lsr_map(reports):
         label, style, category_name = lsr_style(props.get('descript'))
         if style == 'hail':
             label = hail_size_label(props.get('magnitude'), props.get('units')) or 'HAIL'
+        elif style == 'wind':
+            label = wind_speed_label(props.get('magnitude'), props.get('units')) or 'Damage'
         if category_name not in groups:
             groups[category_name] = folium.FeatureGroup(name=category_name, show=True)
             groups[category_name].add_to(m)
@@ -568,7 +604,7 @@ def lsr_map(reports):
                       + html.escape(occurred) + '</div></div>' + ''.join(
             f'<p><strong>{html.escape(label)}:</strong> {html.escape(str(value))}</p>'
             for label, value in fields if value not in (None, '')) + '</div>')
-        # Escape the report-specific hail diameter before inserting it in marker HTML.
+        # Escape report-specific marker text before inserting it in marker HTML.
         icon_html = f'<span class="lsr-label lsr-{style}">{html.escape(label)}</span>'
         folium.Marker(
             location=[lat, lon],
@@ -606,7 +642,7 @@ def local_storm_reports_panel():
         st.info(f'NOAA currently returned no storm reports for the selected states in its {LSR_HOURS}-hour layer.')
     elif mapped < len(reports):
         st.warning(f'{len(reports)-mapped} reports had no usable map coordinates.')
-    st.caption('Hail markers use the original blue FLOOD style and display reported diameter in inches when NOAA supplies a valid size; otherwise they read HAIL. Click a weather-styled word marker to see when the event occurred (Central Time), its location, magnitude and remarks. Reports are preliminary and may change. At statewide zoom, reports appear as compact colored dots. Zoom in to see the full weather-styled words. Click either marker for report details.')
+    st.caption('Hail markers show reported diameter in inches using the original blue FLOOD style. Wind markers retain their existing styling and show reported wind speed in mph, or Damage when no usable speed is supplied. Click a weather-styled word marker to see when the event occurred (Central Time), its location, magnitude and remarks. Reports are preliminary and may change. At statewide zoom, reports appear as compact colored dots. Zoom in to see the full weather-styled words. Click either marker for report details.')
     st.caption(f'Source: NOAA/NWS Local Storm Reports ArcGIS service, layer {LSR_LAYER_ID} (Last_{LSR_HOURS}_Hours).')
 
 
