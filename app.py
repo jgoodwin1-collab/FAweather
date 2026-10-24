@@ -823,7 +823,8 @@ class RainZoomLabels(MacroElement):
 
 # Experimental rainfall analysis. Interpolation is limited to the observation
 # network; colored areas are estimates, NOT measured rainfall at every point.
-def rainfall_contour_overlay(reports):
+def rainfall_contour_overlay(reports, show_minor=False):
+    """Subtle contours with a gauge-distance mask (not extrapolated measurements)."""
     import base64
     import io as _io
     import numpy as np
@@ -833,21 +834,20 @@ def rainfall_contour_overlay(reports):
     from matplotlib.backends.backend_agg import FigureCanvasAgg
     from matplotlib.colors import ListedColormap, BoundaryNorm
 
-    # Average duplicate coordinates to avoid triangulation failures.
     locations = {}
     for r in reports:
         key = (round(r['lon'], 5), round(r['lat'], 5))
         locations.setdefault(key, []).append(r['amount'])
     if len(locations) < 3:
-        return None, 'At least three distinct rainfall stations are needed for contours.'
+        return None, 'At least three distinct stations are needed for interpolation.'
     points = np.asarray(list(locations), dtype=float)
     values = np.asarray([sum(v) / len(v) for v in locations.values()], dtype=float)
     if max(values) < 0.25:
-        return None, 'All reported totals are below 0.25 inch; no requested contours to draw.'
+        return None, 'All totals are below 0.25 inch; no contour thresholds were reached.'
     try:
         interp = LinearNDInterpolator(points, values, fill_value=np.nan)
     except (QhullError, ValueError):
-        return None, 'Station locations do not support a reliable triangulation.'
+        return None, 'Station positions do not support a valid triangulation.'
 
     west, east, south, north = -102.05, -94.59, 36.99, 40.01
     nx, ny = 850, 450
@@ -855,20 +855,26 @@ def rainfall_contour_overlay(reports):
     ys = np.linspace(south, north, ny)
     xx, yy = np.meshgrid(xs, ys)
     rainfall = interp(xx, yy)
-    # Prevent unsupported color extrapolation across large gaps in the network.
-    nearest_distance, _ = cKDTree(points).query(np.column_stack((xx.ravel(), yy.ravel())))
-    rainfall[nearest_distance.reshape(xx.shape) > 0.65] = np.nan
+
+    # Approximate local planar miles (latitude and longitude have different scales).
+    # Mask grid cells >35 miles from the nearest reporting station; this is a
+    # visualization coverage heuristic, not a quantified uncertainty interval.
+    lat_scale = 69.0
+    lon_scale = 69.0 * np.cos(np.deg2rad(38.5))
+    scaled_stations = points * [lon_scale, lat_scale]
+    scaled_grid = np.column_stack((xx.ravel() * lon_scale, yy.ravel() * lat_scale))
+    nearest_miles, _ = cKDTree(scaled_stations).query(scaled_grid)
+    rainfall[nearest_miles.reshape(xx.shape) > 35.0] = np.nan
     rainfall = np.ma.masked_invalid(rainfall)
     if rainfall.count() == 0:
-        return None, 'No supported interpolation area was available.'
+        return None, 'No areas are close enough to reporting gauges for interpolation.'
 
     thresholds = [0.25, 0.5, 1.0]
-    thresholds.extend(float(i) for i in range(2, max(3, int(np.ceil(max(values))) + 1)))
-    # The last bin catches all rainfall above the highest displayed threshold.
+    thresholds += [float(i) for i in range(2, max(3, int(np.ceil(max(values))) + 1))]
     levels = [0.0] + thresholds + [max(float(max(values)) + 1, thresholds[-1] + 1)]
-    palette = ['#f4f7fb', '#c6e8f9', '#89cafa', '#3e9adb', '#1672b6',
-               '#156c79', '#35a052', '#9bbd3b', '#f1cf4c', '#e88d35',
-               '#cf4c49', '#9b4599', '#66388d']
+    # Restrained palette: light blues to blue, green, gold, muted red/purple.
+    palette = ['#e8f3fa', '#ccebf6', '#80c5ec', '#338fd0', '#40a876',
+               '#e6b54e', '#d98954', '#b85b68', '#9363a0', '#77558e']
     if len(levels) - 1 > len(palette):
         palette += [palette[-1]] * (len(levels) - 1 - len(palette))
     cmap = ListedColormap(palette[:len(levels)-1])
@@ -882,31 +888,74 @@ def rainfall_contour_overlay(reports):
     ax.set_ylim(south, north)
     ax.axis('off')
     ax.contourf(xx, yy, rainfall, levels=levels, cmap=cmap, norm=norm,
-                antialiased=True, alpha=0.55)
-    visible_levels = [v for v in thresholds if v <= float(rainfall.max())]
+                antialiased=True, alpha=0.40)
+    # Statewide view: only 1-inch interval lines. Minor thresholds are reserved
+    # for zoomed-in viewing; the raster is switched without rebuilding the map.
+    visible_levels = ([v for v in thresholds if v <= float(rainfall.max())]
+                      if show_minor else
+                      [v for v in thresholds if v >= 1.0 and v <= float(rainfall.max())])
     if visible_levels:
         ax.contour(xx, yy, rainfall, levels=visible_levels,
-                   colors='#173d61', linewidths=0.8, alpha=0.8)
+                   colors='#285c76', linewidths=0.65 if show_minor else 0.85,
+                   alpha=0.65 if show_minor else 0.72)
     png = _io.BytesIO()
     fig.savefig(png, format='png', dpi=130, transparent=True, pad_inches=0)
     uri = 'data:image/png;base64,' + base64.b64encode(png.getvalue()).decode('ascii')
     return (uri, [[south, west], [north, east]]), None
 
 
-def make_cocorahs_map(reports):
+class RainContourZoom(MacroElement):
+    """Show minor 0.25/0.50 contours only at neighborhood zoom levels."""
+    _template = Template(r"""
+    {% macro script(this, kwargs) %}
+    (function() {
+      var map = {{this._parent.get_name()}};
+      var major = {{this.major}};
+      var detail = {{this.detail}};
+      function sync() {
+        if (!map.hasLayer(major) && !map.hasLayer(detail)) return;
+        if (map.getZoom() >= 9) {
+          if (map.hasLayer(major)) map.removeLayer(major);
+          if (!map.hasLayer(detail)) map.addLayer(detail);
+        } else {
+          if (map.hasLayer(detail)) map.removeLayer(detail);
+          if (!map.hasLayer(major)) map.addLayer(major);
+        }
+      }
+      map.on('zoomend', sync);
+      sync();
+    })();
+    {% endmacro %}
+    """)
+
+    def __init__(self, major, detail):
+        super().__init__()
+        self._name = 'RainContourZoom'
+        self.major = major.get_name()
+        self.detail = detail.get_name()
+
+
+def make_cocorahs_map(reports, display_mode="Contours + observations"):
     from branca.element import Element
     m = folium.Map(location=[38.5, -98], zoom_start=7,
                    tiles='OpenStreetMap', control_scale=True)
     m.get_root().header.add_child(Element(RAIN_MARKER_CSS))
-    try:
-        contour, contour_note = rainfall_contour_overlay(reports)
-    except Exception as exc:
-        contour, contour_note = None, f'Contour analysis unavailable: {type(exc).__name__}'
-    if contour:
-        folium.raster_layers.ImageOverlay(
-            image=contour[0], bounds=contour[1], name='Estimated rainfall contours',
-            opacity=1, interactive=False, cross_origin=False, show=True,
-        ).add_to(m)
+    contour_note = None
+    if display_mode == 'Contours + observations':
+        try:
+            major, contour_note = rainfall_contour_overlay(reports, show_minor=False)
+            detail, _ = rainfall_contour_overlay(reports, show_minor=True)
+        except Exception as exc:
+            major, detail = None, None
+            contour_note = f'Contour analysis unavailable: {type(exc).__name__}'
+        if major and detail:
+            major_layer = folium.raster_layers.ImageOverlay(
+                image=major[0], bounds=major[1], name='Estimated rainfall contours',
+                opacity=1, interactive=False, show=True).add_to(m)
+            detail_layer = folium.raster_layers.ImageOverlay(
+                image=detail[0], bounds=detail[1], name='Detailed rainfall contours',
+                opacity=1, interactive=False, show=False).add_to(m)
+            m.add_child(RainContourZoom(major_layer, detail_layer))
     layer = folium.FeatureGroup(name='CoCoRaHS rainfall totals', show=True).add_to(m)
     for item in reports:
         amount = item['amount']
@@ -958,19 +1007,26 @@ def cocorahs_rainfall_panel():
     st.caption('Zoomed out: blue station dots. Zoom in past level 8: labels show rainfall '
                'rounded to one decimal inch. Click a marker for the reported value '
                'to two decimals and station details. T indicates trace precipitation.')
-    rain_map, contour_note = make_cocorahs_map(reports)
+    display_mode = st.radio('Rainfall map display',
+                            ['Contours + observations', 'Observed totals only'],
+                            horizontal=True, key='cocorahs_display_mode')
+    rain_map, contour_note = make_cocorahs_map(reports, display_mode)
     if contour_note:
         st.info(contour_note)
-    st.caption('**Experimental estimated rainfall contours:** 0.25", 0.50", 1.0", '
-               'then 2.0", 3.0", 4.0" and higher in 1-inch steps as needed. '
-               'Light colors indicate lower totals; deeper blues, greens, yellows, '
-               'oranges, reds and purples indicate higher totals. Dark lines mark thresholds. '
-               'Turn the contour layer on/off in the map layer menu.')
+    st.caption('**Estimated contour thresholds:** 0.25", 0.50", 1.0", then 2.0", '
+               '3.0", and upward by 1". At statewide zoom, only 1-inch contour lines '
+               'are drawn; zoom to level 9+ to reveal the 0.25" and 0.50" lines. '
+               'Colored areas are deliberately translucent (40%).')
+    st.markdown('**Estimated rainfall color key (inches):**')
+    st.markdown('🟦 **0–0.25** · 🩵 **0.25–0.50** · 🔵 **0.50–1.0** · '
+                '🔵 **1.0–2.0** · 🟢 **2.0–3.0** · 🟡 **3.0–4.0** · '
+                '🟠 **4.0–5.0** · 🔴 **5.0–6.0** · 🟣 **6.0+**')
     st_folium(rain_map, width='stretch', height=550,
               returned_objects=[], key='ks_cocorahs_rainfall_map')
-    st.caption('Contour shading is interpolated between stations and is not a direct '
-               'measurement. Areas outside the supported gauge network are left unshaded; '
-               'localized rainfall maxima/minima may be missed.')
+    st.caption('Shading is an interpolated estimate, not an observed total. Areas more than '
+               'approximately 35 miles from the nearest reporting gauge, or outside the '
+               'station triangulation, are left transparent. The 35-mile cutoff is a display '
+               'rule, not a statistical confidence bound; local extremes can be missed.')
     st.caption('Source: CoCoRaHS volunteer daily precipitation observations. '
                'Reports are station measurements and may not represent conditions between gauges.')
 
