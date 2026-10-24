@@ -1041,6 +1041,8 @@ cocorahs_rainfall_panel()
 
 
 # USGS NLDI watershed upstream of the Topeka streamgage (not the entire creek basin).
+# Use the minimal endpoint that successfully returned GeoJSON in the user's browser.
+# Streamlit caches successful responses for 24 hours; no offline backup is bundled yet.
 BASIN_GAGE_ID = '06889630'
 BASIN_URL = ('https://api.water.usgs.gov/nldi/linked-data/nwissite/'
              f'USGS-{BASIN_GAGE_ID}/basin')
@@ -1049,7 +1051,7 @@ BASIN_URL = ('https://api.water.usgs.gov/nldi/linked-data/nwissite/'
 @st.cache_data(ttl=86400, show_spinner=False)
 def shunganunga_basin():
     response = requests.get(BASIN_URL,
-                            params={'f': 'json', 'simplified': 'true', 'splitCatchment': 'true'},
+                            params={'f': 'json'},
                             headers={'User-Agent': USER_AGENT, 'Accept': 'application/json'},
                             timeout=35)
     response.raise_for_status()
