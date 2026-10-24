@@ -1,4 +1,8 @@
 import re
+import csv
+import io
+import math
+from datetime import date
 import html
 import json
 from datetime import datetime, timezone
@@ -689,6 +693,197 @@ def local_storm_reports_panel():
 
 
 local_storm_reports_panel()
+
+
+
+
+# Third, independent CoCoRaHS rainfall map. Only Kansas is requested from this
+# source, even when the separate LSR map is in three-state testing mode.
+# This is a fixed historical report date, NOT a rolling 24-hour total.
+COCORAHS_REPORT_DATE = '10/14/2026'  # MM/DD/YYYY; edit for another day.
+COCORAHS_EXPORT_URL = 'https://data.cocorahs.org/export/exportreports.aspx'
+
+
+def _rain_field(row, *aliases):
+    """Match CoCoRaHS CSV headers despite spaces/case/punctuation changes."""
+    normalized = {re.sub(r'[^a-z0-9]', '', str(k).lower()): v for k, v in row.items() if k}
+    for alias in aliases:
+        value = normalized.get(re.sub(r'[^a-z0-9]', '', alias.lower()))
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ''
+
+
+def _rain_amount(raw):
+    raw = str(raw or '').strip().replace(',', '')
+    # T=trace is not 0.00; keep its distinct meaning in popups/labels.
+    if raw.upper() in ('T', 'TRACE'):
+        return 0.0, 'Trace'
+    if not raw or raw.upper() in ('NA', 'N/A', 'M', 'NULL', 'NONE', '-9999'):
+        return None, None
+    try:
+        amount = float(raw)
+    except ValueError:
+        return None, None
+    if not math.isfinite(amount) or amount < 0 or amount > 100:
+        return None, None
+    return amount, f'{amount:.2f}"'
+
+
+def _parse_cocorahs_csv(body):
+    if not body.strip():
+        raise ValueError('CoCoRaHS returned an empty CSV.')
+    if body.lstrip().lower().startswith(('<!doctype', '<html')):
+        raise ValueError('CoCoRaHS returned a web page rather than CSV data.')
+    # Some exports have descriptive lines preceding the header.
+    lines = body.lstrip('\ufeff').splitlines()
+    header_idx = next((i for i, line in enumerate(lines[:35])
+                       if 'latitude' in line.lower() and 'longitude' in line.lower()), None)
+    if header_idx is None:
+        raise ValueError('CoCoRaHS CSV does not contain Latitude/Longitude headers.')
+    reader = csv.DictReader(io.StringIO('\n'.join(lines[header_idx:])))
+    reports = []
+    for row in reader:
+        try:
+            lat = float(_rain_field(row, 'Latitude', 'Lat'))
+            lon = float(_rain_field(row, 'Longitude', 'Lon', 'Long'))
+        except ValueError:
+            continue
+        # Kansas bounding check protects against non-Kansas export rows.
+        if not (36.98 <= lat <= 40.02 and -102.07 <= lon <= -94.55):
+            continue
+        state = _rain_field(row, 'State', 'StateCode', 'StateAbbreviation')
+        if state and state.upper() not in ('KS', 'KANSAS'):
+            continue
+        raw_amount = _rain_field(row, 'TotalPrecipAmt', 'TotalPrecipitation',
+                                 'Precipitation', 'PrecipAmount', 'PrecipAmt',
+                                 'GaugeCatch', 'GaugeCatchIn', '24hrPrecip',
+                                 'TotalPrecip', 'Precip', 'Rainfall')
+        amount, detail = _rain_amount(raw_amount)
+        if amount is None:
+            continue
+        reports.append({
+            'lat': lat, 'lon': lon, 'amount': amount, 'detail': detail,
+            'station': _rain_field(row, 'StationNumber', 'StationID', 'StationCode'),
+            'name': _rain_field(row, 'StationName', 'Station'),
+            'county': _rain_field(row, 'County', 'CountyName'),
+            'obs_time': _rain_field(row, 'ObservationTime', 'ObsTime', 'ObservationDate', 'ObsDate'),
+        })
+    return reports
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def cocorahs_daily_reports(report_date):
+    params = {'ReportType': 'Daily', 'dtf': '1', 'Format': 'CSV',
+              'State': 'KS', 'ReportDateType': 'reportdate',
+              'Date': report_date, 'TimesInGMT': 'False'}
+    response = requests.get(COCORAHS_EXPORT_URL, params=params,
+                            headers={'User-Agent': USER_AGENT, 'Accept': 'text/csv,*/*'},
+                            timeout=45)
+    response.raise_for_status()
+    reports = _parse_cocorahs_csv(response.text)
+    return reports, datetime.now(timezone.utc).isoformat()
+
+
+RAIN_MARKER_CSS = r"""<style>
+.coco-rain {display:inline-block;position:relative;transform:translate(-50%,-50%);
+  padding:4px 7px;white-space:nowrap;font:900 15px Arial,sans-serif;
+  color:#ffffff;background:#126da6;border:1px solid #a5e8ff;
+  border-radius:7px;text-shadow:0 1px 1px #003a60;
+  box-shadow:0 2px 4px #0008;cursor:pointer;}
+.coco-rain::after {content:'';position:absolute;bottom:-4px;left:50%;width:6px;height:6px;
+  border-radius:50%;background:#ffffff;transform:translateX(-50%);}
+/* At statewide zoom use small dots; expand into readable totals when zoomed in. */
+.coco-compact .coco-rain {font-size:0 !important;line-height:0;padding:0;width:11px;height:11px;
+  border-radius:50%;box-sizing:border-box;transform:translate(-50%,-50%);text-shadow:none;}
+.coco-compact .coco-rain::after {display:none;}
+.coco-compact .coco-rain:hover {outline:2px solid white;outline-offset:2px;}
+</style>"""
+
+
+class RainZoomLabels(MacroElement):
+    _template = Template(r"""
+    {% macro script(this, kwargs) %}
+    (function() {
+      var map = {{this._parent.get_name()}};
+      function sync() {
+        var el = map.getContainer();
+        if (map.getZoom() <= 8) el.classList.add('coco-compact');
+        else el.classList.remove('coco-compact');
+      }
+      map.on('zoomend', sync); sync();
+    })();
+    {% endmacro %}
+    """)
+
+    def __init__(self):
+        super().__init__()
+        self._name = 'RainZoomLabels'
+
+
+def make_cocorahs_map(reports):
+    from branca.element import Element
+    m = folium.Map(location=[38.5, -98], zoom_start=7,
+                   tiles='OpenStreetMap', control_scale=True)
+    m.get_root().header.add_child(Element(RAIN_MARKER_CSS))
+    layer = folium.FeatureGroup(name='CoCoRaHS rainfall totals', show=True).add_to(m)
+    for item in reports:
+        amount = item['amount']
+        # Only the marker is rounded. The popup retains hundredths of an inch.
+        label = 'T' if item['detail'] == 'Trace' else f'{amount:.1f}"'
+        popup_fields = [
+            ('Rainfall', item['detail']), ('Station', item['station']),
+            ('Station name', item['name']), ('County', item['county']),
+            ('Observation time (as supplied)', item['obs_time']),
+            ('Report date', COCORAHS_REPORT_DATE),
+        ]
+        popup = '<div style="width:250px;font:14px Arial,sans-serif"><strong>CoCoRaHS Daily Rainfall</strong>'
+        popup += ''.join(f'<p><b>{html.escape(k)}:</b> {html.escape(str(v))}</p>'
+                         for k, v in popup_fields if v)
+        popup += '</div>'
+        folium.Marker(
+            [item['lat'], item['lon']],
+            icon=folium.DivIcon(html=f'<span class="coco-rain">{html.escape(label)}</span>',
+                                icon_size=(0, 0), icon_anchor=(0, 0),
+                                class_name='coco-custom-icon'),
+            tooltip=f'{label} — {item["name"] or item["station"] or "Rainfall station"}',
+            popup=folium.Popup(popup, max_width=310),
+        ).add_to(layer)
+    folium.LayerControl(collapsed=True).add_to(m)
+    m.add_child(RainZoomLabels())
+    m.fit_bounds([[36.99, -102.05], [40.01, -94.59]])
+    return m
+
+
+@st.fragment(run_every='30min')
+def cocorahs_rainfall_panel():
+    st.divider()
+    st.subheader('🌧️ Kansas CoCoRaHS Rainfall Reports')
+    st.caption(f'Daily gauge reports for {COCORAHS_REPORT_DATE} (report date). '
+               'This is a historical daily report map, not a live radar or a rolling 24-hour rainfall estimate.')
+    try:
+        reports, retrieved = cocorahs_daily_reports(COCORAHS_REPORT_DATE)
+    except (requests.RequestException, ValueError, csv.Error) as exc:
+        st.warning(f'CoCoRaHS rainfall data could not be loaded: {exc}. '
+                   'The radar and Local Storm Reports maps are unaffected.')
+        st.markdown(f'[View CoCoRaHS data exports]({COCORAHS_EXPORT_URL})')
+        return
+    st.caption('Data retrieved: ' + central_time(retrieved))
+    st.metric('Kansas rainfall observations mapped', len(reports))
+    if not reports:
+        st.info('No mappable Kansas rainfall observations were returned for this date. '
+                'Check the CSV column names or choose another report date.')
+        return
+    st.caption('Zoomed out: blue station dots. Zoom in past level 8: labels show rainfall '
+               'rounded to one decimal inch. Click a marker for the reported value '
+               'to two decimals and station details. T indicates trace precipitation.')
+    st_folium(make_cocorahs_map(reports), width='stretch', height=550,
+              returned_objects=[], key='ks_cocorahs_rainfall_map')
+    st.caption('Source: CoCoRaHS volunteer daily precipitation observations. '
+               'Reports are station measurements and may not represent conditions between gauges.')
+
+
+cocorahs_rainfall_panel()
 
 
 st.subheader('Local weather forecast')
