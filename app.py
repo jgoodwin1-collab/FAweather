@@ -1034,6 +1034,112 @@ def cocorahs_rainfall_panel():
 cocorahs_rainfall_panel()
 
 
+# Fourth independent map: experimental rainfall-runoff scenario laboratory.
+# This first pilot does NOT model inundation depth, stream stage, road overtopping,
+# bridge/culvert hydraulics, or delineate a verified watershed boundary.
+# All calculations are deliberately labeled illustrative screening only.
+
+
+def flood_scenario_map(center_lat, center_lon, radius_miles, rain_inches, duration_hours,
+                       runoff_fraction, crossing_restriction):
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=11,
+                   tiles='OpenStreetMap', control_scale=True)
+    # Circle represents user-selected hypothetical rainfall footprint, NOT a basin.
+    folium.Circle(
+        location=[center_lat, center_lon], radius=radius_miles * 1609.344,
+        color='#46b4ee', weight=2, fill=True, fill_color='#56b9ed',
+        fill_opacity=0.17,
+        tooltip='Illustrative uniform-rainfall footprint (not a watershed or inundation extent)',
+        popup=folium.Popup(
+            f'<b>Hypothetical rainfall footprint</b><br>{rain_inches:.1f} inches over '
+            f'{duration_hours:g} hours<br>Radius: {radius_miles:g} miles<br>'
+            'This is NOT a mapped flood extent.', max_width=300)
+    ).add_to(m)
+    folium.Marker(
+        [center_lat, center_lon],
+        tooltip='Scenario center — approximate Shunganunga Creek / Topeka area',
+        popup='Scenario center only. Move the latitude/longitude controls to explore other locations.',
+        icon=folium.Icon(color='blue', icon='tint', prefix='fa')
+    ).add_to(m)
+    folium.LayerControl(collapsed=True).add_to(m)
+    m.fit_bounds([[center_lat - radius_miles / 69 * 1.35,
+                   center_lon - radius_miles / 54 * 1.35],
+                  [center_lat + radius_miles / 69 * 1.35,
+                   center_lon + radius_miles / 54 * 1.35]])
+    return m
+
+
+@st.fragment
+
+def experimental_flood_panel():
+    st.divider()
+    st.subheader('🧪 Kansas Flood Simulator — Shunganunga Creek pilot')
+    st.warning('EXPERIMENTAL SCENARIO ONLY — This is NOT a flood-inundation map, '
+               'road-closure prediction, or safety assessment. Do not use it to decide '
+               'whether any road is safe to travel.')
+    st.caption('Fourth independent map. The shaded circle is the assumed rainfall footprint, '
+               'NOT the drainage basin or the area that would flood. No other maps are changed.')
+    left, right = st.columns(2)
+    with left:
+        rain = st.slider('Hypothetical rainfall (inches)', 0.5, 15.0, 12.0, 0.5,
+                         key='flood_rain')
+        duration = st.select_slider('Rainfall duration (hours)',
+                                    options=[1, 2, 3, 6, 12, 24], value=3,
+                                    key='flood_duration')
+        radius = st.slider('Illustrative rainfall footprint radius (miles)',
+                           1.0, 15.0, 5.0, 0.5, key='flood_radius')
+    with right:
+        soil = st.selectbox('Assumed initial runoff conditions',
+                            ['Dry (20% runoff)', 'Typical (45% runoff)',
+                             'Saturated (75% runoff)'], index=1,
+                            key='flood_soil')
+        restriction = st.checkbox('Hypothetical restricted crossing / debris blockage',
+                                  key='flood_restriction')
+        st.caption('Restriction is a scenario flag only. No bridge or culvert capacity '
+                   'data have been loaded; it does not alter computed water depth.')
+    with st.expander('Adjust scenario center (illustrative Topeka starting point)'):
+        lat = st.number_input('Latitude', min_value=36.9, max_value=40.1,
+                              value=39.025, step=0.005, format='%.3f', key='flood_lat')
+        lon = st.number_input('Longitude', min_value=-102.1, max_value=-94.5,
+                              value=-95.670, step=0.005, format='%.3f', key='flood_lon')
+    fraction = {'Dry (20% runoff)': 0.20, 'Typical (45% runoff)': 0.45,
+                'Saturated (75% runoff)': 0.75}[soil]
+    # Hypothetical volume balance: uniform rain over circular footprint.
+    # These volumes do not represent streamflow, peak discharge or flood stage.
+    area_sqmi = math.pi * radius ** 2
+    volume_acft = rain / 12 * area_sqmi * 640
+    runoff_acft = volume_acft * fraction
+    a, b, c = st.columns(3)
+    a.metric('Average rain intensity', f'{rain / duration:.2f} in/hr')
+    b.metric('Hypothetical rainfall volume', f'{volume_acft:,.0f} acre-ft')
+    c.metric('Illustrative runoff volume', f'{runoff_acft:,.0f} acre-ft')
+    st.caption(f'Calculation assumes uniform {rain:g} inches of rain across a circular '
+               f'{area_sqmi:,.1f} square-mile footprint and a fixed {fraction:.0%} runoff '
+               'fraction. These assumed fractions are not calibrated to the Shunganunga '
+               'watershed. Runoff volume is NOT peak streamflow or inundation depth.')
+    if restriction:
+        st.info('Restricted-crossing scenario selected. A blockage could increase upstream '
+                'water levels, but its effect cannot be quantified without crossing '
+                'geometry, flow routing and hydraulic modeling.')
+    m = flood_scenario_map(lat, lon, radius, rain, duration, fraction, restriction)
+    st_folium(m, width='stretch', height=510, returned_objects=[],
+              key='experimental_kansas_flood_map')
+    st.caption('Map baselayer: OpenStreetMap. Scenario center is approximate, not a '
+               'surveyed creek or crossing location. Circle is not a flood forecast.')
+    with st.expander('What is needed before this can estimate flooded roads?'):
+        st.markdown("""- **USGS 3DEP terrain:** drainage directions, valley geometry, road elevations.
+- **USGS NHD / StreamStats:** actual watershed and channel network.
+- **NOAA Atlas 14 / Atlas 15 and rainfall grids:** storm frequency and spatial distribution.
+- **USGS streamgages and historic floods:** calibration and validation.
+- **Roads, bridges, culverts and construction records:** conveyance and obstructions.
+- **HEC-HMS / HEC-RAS or validated HAND-based hydraulics:** runoff routing, stage, and flood depth.
+
+Until these are connected and tested, the prototype intentionally does not color roads as flooded or safe.""")
+
+
+experimental_flood_panel()
+
+
 st.subheader('Local weather forecast')
 try:
     daily = nws_forecast(point['forecast'])
