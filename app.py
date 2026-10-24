@@ -1040,12 +1040,48 @@ cocorahs_rainfall_panel()
 # All calculations are deliberately labeled illustrative screening only.
 
 
+# USGS NLDI watershed upstream of the Topeka streamgage (not the entire creek basin).
+BASIN_GAGE_ID = '06889630'
+BASIN_URL = ('https://api.water.usgs.gov/nldi/linked-data/nwissite/'
+             f'USGS-{BASIN_GAGE_ID}/basin')
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def shunganunga_basin():
+    response = requests.get(BASIN_URL,
+                            params={'f': 'json', 'simplified': 'true', 'splitCatchment': 'true'},
+                            headers={'User-Agent': USER_AGENT, 'Accept': 'application/json'},
+                            timeout=35)
+    response.raise_for_status()
+    data = response.json()
+    if data.get('type') == 'FeatureCollection':
+        features = data.get('features') or []
+        if not features:
+            raise ValueError('USGS returned no watershed polygon.')
+        geom = features[0].get('geometry')
+    elif data.get('type') == 'Feature':
+        geom = data.get('geometry')
+    else:
+        geom = data
+    if not isinstance(geom, dict) or geom.get('type') not in ('Polygon', 'MultiPolygon'):
+        raise ValueError('USGS did not return a polygon geometry.')
+    return geom
+
+
 def flood_scenario_map(center_lat, center_lon, radius_miles, rain_inches, duration_hours,
-                       runoff_fraction, crossing_restriction):
+                       runoff_fraction, crossing_restriction, basin_geometry=None, show_circle=True):
     m = folium.Map(location=[center_lat, center_lon], zoom_start=11,
                    tiles='OpenStreetMap', control_scale=True)
-    # Circle represents user-selected hypothetical rainfall footprint, NOT a basin.
-    folium.Circle(
+    if basin_geometry:
+        folium.GeoJson(
+            basin_geometry, name='USGS watershed above gage 06889630',
+            style_function=lambda _: {'color': '#f2a33b', 'weight': 4,
+                                      'fillColor': '#e7a03d', 'fillOpacity': 0.10},
+            tooltip='USGS NLDI upstream drainage basin — NOT an inundation extent',
+        ).add_to(m)
+    # Optional circle represents hypothetical rainfall footprint, NOT flooding.
+    if show_circle:
+        folium.Circle(
         location=[center_lat, center_lon], radius=radius_miles * 1609.344,
         color='#46b4ee', weight=2, fill=True, fill_color='#56b9ed',
         fill_opacity=0.17,
@@ -1062,10 +1098,28 @@ def flood_scenario_map(center_lat, center_lon, radius_miles, rain_inches, durati
         icon=folium.Icon(color='blue', icon='tint', prefix='fa')
     ).add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
-    m.fit_bounds([[center_lat - radius_miles / 69 * 1.35,
-                   center_lon - radius_miles / 54 * 1.35],
-                  [center_lat + radius_miles / 69 * 1.35,
-                   center_lon + radius_miles / 54 * 1.35]])
+    if basin_geometry:
+        try:
+            # Folium bounds of the polygon (including MultiPolygon geometry).
+            coords = []
+            def collect(node):
+                if isinstance(node, list):
+                    if len(node) >= 2 and all(isinstance(v, (int, float)) for v in node[:2]):
+                        coords.append(node[:2])
+                    else:
+                        for item in node:
+                            collect(item)
+            collect(basin_geometry['coordinates'])
+            if coords:
+                m.fit_bounds([[min(y for x, y in coords), min(x for x, y in coords)],
+                              [max(y for x, y in coords), max(x for x, y in coords)]])
+        except (ValueError, KeyError, TypeError):
+            pass
+    else:
+        m.fit_bounds([[center_lat - radius_miles / 69 * 1.35,
+                       center_lon - radius_miles / 54 * 1.35],
+                      [center_lat + radius_miles / 69 * 1.35,
+                       center_lon + radius_miles / 54 * 1.35]])
     return m
 
 
@@ -1077,8 +1131,17 @@ def experimental_flood_panel():
     st.warning('EXPERIMENTAL SCENARIO ONLY — This is NOT a flood-inundation map, '
                'road-closure prediction, or safety assessment. Do not use it to decide '
                'whether any road is safe to travel.')
-    st.caption('Fourth independent map. The shaded circle is the assumed rainfall footprint, '
-               'NOT the drainage basin or the area that would flood. No other maps are changed.')
+    st.caption('Fourth independent map. Orange outline: actual upstream basin from USGS when available. '
+               'Blue circle: optional hypothetical rainfall footprint. Neither represents flood extent.')
+    try:
+        basin_geometry = shunganunga_basin()
+        st.success('USGS NLDI watershed boundary loaded for streamgage 06889630.')
+    except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+        basin_geometry = None
+        st.warning('USGS watershed boundary unavailable at this moment; only the hypothetical '
+                   f'rainfall footprint can be displayed. Details: {type(exc).__name__}: {exc}')
+    show_circle = st.checkbox('Show hypothetical rainfall circle', value=True,
+                              key='flood_show_circle')
     left, right = st.columns(2)
     with left:
         rain = st.slider('Hypothetical rainfall (inches)', 0.5, 15.0, 12.0, 0.5,
@@ -1121,11 +1184,15 @@ def experimental_flood_panel():
         st.info('Restricted-crossing scenario selected. A blockage could increase upstream '
                 'water levels, but its effect cannot be quantified without crossing '
                 'geometry, flow routing and hydraulic modeling.')
-    m = flood_scenario_map(lat, lon, radius, rain, duration, fraction, restriction)
+    m = flood_scenario_map(lat, lon, radius, rain, duration, fraction, restriction,
+                           basin_geometry=basin_geometry, show_circle=show_circle)
     st_folium(m, width='stretch', height=510, returned_objects=[],
               key='experimental_kansas_flood_map')
-    st.caption('Map baselayer: OpenStreetMap. Scenario center is approximate, not a '
-               'surveyed creek or crossing location. Circle is not a flood forecast.')
+    st.caption('Watershed boundary: USGS NLDI/NHDPlusV2 basin above gage 06889630; '
+               'not necessarily the full Shunganunga watershed. The 33.5-square-mile '
+               'published gage drainage area is a reference, not the area used in the '
+               'volume calculation. Volumes still apply only to the hypothetical circle. '
+               'OpenStreetMap baselayer. No inundation depths or road overtopping modeled.')
     with st.expander('What is needed before this can estimate flooded roads?'):
         st.markdown("""- **USGS 3DEP terrain:** drainage directions, valley geometry, road elevations.
 - **USGS NHD / StreamStats:** actual watershed and channel network.
