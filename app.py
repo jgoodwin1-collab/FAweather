@@ -487,6 +487,8 @@ def wind_speed_label(magnitude, units):
 def lsr_style(event):
     """Choose short readable labels and weather-inspired marker classes."""
     event = (event or '').lower()
+    if 'funnel cloud' in event or 'funnel-cloud' in event:
+        return 'FUNNEL', 'funnel', 'Funnel cloud'
     if 'tornado' in event or 'landspout' in event:
         return 'TORNADO', 'tornado', 'Tornado'
     if 'hail' in event:
@@ -539,6 +541,9 @@ LSR_MARKER_CSS = r"""
  background:linear-gradient(135deg,#d2edff,#809fc9);border:1px solid #fff;}
 .lsr-storm {color:#ffe66b;text-shadow:2px 2px #7c4a00;
  background:linear-gradient(135deg,#4c428e,#25244b);border:1px solid #b5a4ff;}
+/* Gray funnel-cloud marker with a simple cloud and tapered funnel silhouette. */
+.lsr-funnel {color:#fff;background:#556779;border:1px solid #c4d1df;min-width:34px;text-align:center;}
+.lsr-funnel svg {display:block;width:34px;height:29px;overflow:visible;}
 .lsr-other {color:#fff;background:#556779;border:1px solid #c4d1df;}
 /* Compact colored report markers at statewide zoom; full weather words on zoom-in. */
 .lsr-compact .lsr-label {font-size:0 !important;letter-spacing:0;padding:0;width:13px;height:13px;
@@ -571,6 +576,24 @@ class LSRZoomMarkers(MacroElement):
         self._name = 'LSRZoomMarkers'
 
 
+# Display only report types actually plotted on the map.
+LSR_LEGEND_COLORS = {
+    'hail': '#0874b6', 'wind': '#bf681f', 'flood': '#104578',
+    'rain': '#0874b6', 'tornado': '#b52840', 'funnel': '#556779',
+    'fog': '#59626d', 'snow': '#809fc9', 'ice': '#809fc9',
+    'storm': '#4c428e', 'other': '#556779',
+}
+
+FUNNEL_SVG = (
+    '<svg viewBox="0 0 42 34" xmlns="http://www.w3.org/2000/svg" aria-label="Funnel cloud" role="img">'
+    '<path d="M8 13 C2 13 2 4 11 5 C13 -1 24 -1 27 5 C37 3 41 13 33 16 L11 16 Z" '
+    'fill="#e6ebf1" stroke="#a7b2bf" stroke-width="1.5"/>'
+    '<path d="M12 16 C16 19 30 17 30 16 C27 21 25 23 23 25 C21 27 23 30 19 33 '
+    'C19 28 15 25 17 23 C18 21 14 20 12 16 Z" fill="#d3dbe5" stroke="#9ba9b9" stroke-width="1"/>'
+    '</svg>'
+)
+
+
 def lsr_map(reports):
     m = folium.Map(location=[36.0, -102.0] if TEST_THREE_STATES else [38.5, -98], zoom_start=6 if TEST_THREE_STATES else 7,
                    tiles='OpenStreetMap', control_scale=True)
@@ -579,6 +602,7 @@ def lsr_map(reports):
     m.get_root().header.add_child(Element(LSR_MARKER_CSS))
     groups = {}
     mapped = 0
+    legend_counts = {}
     for report in reports:
         props = report.get('attributes') or {}
         geom = report.get('geometry') or {}
@@ -605,7 +629,8 @@ def lsr_map(reports):
             f'<p><strong>{html.escape(label)}:</strong> {html.escape(str(value))}</p>'
             for label, value in fields if value not in (None, '')) + '</div>')
         # Escape report-specific marker text before inserting it in marker HTML.
-        icon_html = f'<span class="lsr-label lsr-{style}">{html.escape(label)}</span>'
+        marker_content = FUNNEL_SVG if style == 'funnel' else html.escape(label)
+        icon_html = f'<span class="lsr-label lsr-{style}">{marker_content}</span>' 
         folium.Marker(
             location=[lat, lon],
             icon=folium.DivIcon(html=icon_html, icon_size=(0, 0), icon_anchor=(0, 0),
@@ -614,10 +639,12 @@ def lsr_map(reports):
             popup=folium.Popup(popup_html, max_width=340),
         ).add_to(groups[category_name])
         mapped += 1
+        legend_key = (category_name, style)
+        legend_counts[legend_key] = legend_counts.get(legend_key, 0) + 1
     folium.LayerControl(collapsed=True).add_to(m)
     m.add_child(LSRZoomMarkers())
     m.fit_bounds(MAP_BOUNDS)
-    return m, mapped
+    return m, mapped, legend_counts
 
 
 @st.fragment(run_every='30min')
@@ -636,7 +663,22 @@ def local_storm_reports_panel():
     st.caption('Last successful report retrieval: ' +
                central_time(retrieved))
     st.metric(f'Regional storm reports ({LSR_HOURS} hours)', len(reports))
-    m, mapped = lsr_map(reports)
+    m, mapped, legend_counts = lsr_map(reports)
+    if legend_counts:
+        legend_parts = []
+        for (name, style), count in sorted(legend_counts.items(), key=lambda item: item[0][0]):
+            color = LSR_LEGEND_COLORS.get(style, '#556779')
+            legend_parts.append(
+                '<span style="display:inline-flex;align-items:center;gap:6px;'
+                'padding:5px 9px;margin:3px 5px 3px 0;background:#182a3f;'
+                'border:1px solid #3a4b60;border-radius:6px;color:#f3f7ff;'
+                'font:13px Arial,sans-serif;white-space:nowrap">'
+                f'<span style="display:inline-block;width:13px;height:13px;'
+                f'background:{color};border:1px solid #b9c7d6;border-radius:3px"></span>'
+                f'{html.escape(name)} ({count})</span>'
+            )
+        st.markdown('**Reports currently displayed — legend**')
+        st.markdown(''.join(legend_parts), unsafe_allow_html=True)
     st_folium(m, width='stretch', height=530, returned_objects=[], key='ks_lsr_map')
     if not reports:
         st.info(f'NOAA currently returned no storm reports for the selected states in its {LSR_HOURS}-hour layer.')
